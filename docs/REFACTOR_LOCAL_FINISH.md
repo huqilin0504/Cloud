@@ -55,7 +55,7 @@ python3 -m rock_discontinuity.processing.roi_compare --help -> 0
 
 - `f49b91f refactor: type global aggregation stage`
 - `4a1bce3 refactor: separate ROI comparison entrypoint`
-- 后续纯函数接口收尾提交见 `git log`。
+- `81aadaa refactor: make whole-cloud report stages explicit`
 
 没有推送远端。当前 Git 工作区只保留用户未跟踪的 `pointcloud_joint_extraction/`，没有把它加入
 暂存或提交。
