@@ -1,0 +1,207 @@
+input:
+  path: null
+  roi: null
+  chunk_size: 500000
+  max_points_without_roi: 2000000
+
+coordinate:
+  x_axis: east
+  y_axis: north
+  z_axis: up
+  unit: meter
+
+target:
+  min_structure_scale_m: 0.5
+  min_minor_extent_m: 0.15
+  min_area_m2: 0.25
+
+density:
+  target_raw_density_points_m2: 600.0
+  expected_retention_ratio: 0.70
+  sample_size: 20000
+  knn: 20
+  surface_estimator: tangent_knn
+  min_local_density_p10_points_m2: 400.0
+  min_local_density_median_points_m2: 600.0
+
+quality:
+  reject_below_effective_points: 25
+  min_effective_points: 100
+  high_quality_points: 200
+  min_inlier_ratio: 0.70
+  min_confidence: 0.60
+  quality_grades:
+    A: 0.85
+    B: 0.70
+    C: 0.55
+
+performance:
+  feature_batch_size: 50000
+
+preprocess:
+  # 600 point/m² standard; 0.03 m is about 1–2 times the 4.1 cm point spacing.
+  voxel_size: 0.03
+  remove_outliers: true
+  outlier_neighbors: 32
+  outlier_std_ratio: 2.5
+
+normal:
+  radius: 0.15
+  min_neighbors: 20
+  knn: 64
+  max_neighbors: 64
+
+normal_multiscale:
+  enabled: true
+  radii_m: [0.12, 0.18, 0.27]
+  max_neighbors: 160
+  stable_angle_deg: 5.0
+  unstable_angle_deg: 10.0
+  min_stable_scales: 2
+  selection: smallest_adjacent_stable
+  selection_min_planarity: 0.35
+  planarity_penalty: 0.75
+  surface_penalty: 0.50
+
+feature:
+  min_planarity: 0.55
+  max_surface_variation: 0.08
+
+orientation_cluster:
+  method: angular_grid
+  angle_eps_deg: 8.0
+  min_samples: 100
+
+region_growing:
+  method: planarity_seeded
+  radius_m: 0.15
+  normal_angle_deg: 8.0
+  normal_angle_base_deg: 8.0
+  normal_angle_max_deg: 12.0
+  refit_every_points: 48
+  min_distance_m: 0.02
+  max_distance_m: 0.05
+  distance_base_m: 0.025
+  distance_max_m: 0.05
+  max_curvature: 0.08
+  require_stable_seed: true
+  max_seed_points: 64
+  max_pairs: 50000000
+
+spatial_cluster:
+  method: sparse_dbscan
+  # At 600 points/m², a 0.15 m support contains about 42 planar points.
+  eps: 0.15
+  min_samples: 20
+  normal_angle_eps_deg: 3.0
+  max_pairs: 50000000
+
+plane:
+  ransac_distance: 0.03
+  ransac_iterations: 1000
+  min_points: 100
+  min_area: 0.25
+  max_rms: 0.05
+  normal_dispersion_limit_deg: 12.0
+
+plane_refine:
+  method: ransac_tls
+  robust_irpf_optional: false
+  random_seed: 20260909
+
+plane_gate:
+  min_effective_points: 100
+  min_area_m2: 0.25
+  min_minor_extent_m: 0.15
+  min_inlier_ratio: 0.70
+
+joint_sets:
+  method: dbscan_axial_normals
+  angular_eps_deg: 10.0
+  max_set_deviation_deg: 12.0
+  min_planes: 3
+  fisher_statistics: true
+
+detachment:
+  # Conservative geometry-only candidate gate. All fitted facets remain in planes.csv.
+  mode: conservative_planar_discontinuity_candidate
+  min_confidence: 0.70
+  min_area_m2: 0.25
+  # The engineering target is a 0.5 m joint-plane scale, not a 0.15 m strip.
+  min_minor_extent_m: 0.50
+  min_boundary_completeness: 0.70
+  min_inlier_ratio: 0.80
+  max_normal_dispersion_deg: 8.0
+  # Safe for an explicit ROI; tiles keep censored facets for cross-tile recovery.
+  reject_edge_censored_roi: true
+
+boundary:
+  method: alpha_shape
+  alpha: auto
+  max_points: 5000
+  edge_margin_m: 0.15
+
+spacing:
+  method: finite_3d_and_virtual_scanline
+  finite_3d_enabled: true
+  virtual_scanline_enabled: true
+  min_normal_alignment: 0.90
+  min_planes: 2
+  max_pair_samples: 2000
+
+tiling:
+  mode: 3d_preferred_xy_fallback
+  tile_size_m: 25.0
+  overlap_m: 1.0
+  target_points_per_tile: 1200000
+  max_points_per_tile: 2000000
+
+trace:
+  method: normal_tensor_voting
+  verification: human_review
+  available: false
+
+aperture:
+  source: highest_resolution_mesh_or_image
+  minimum_resolution_factor: 3.0
+  available: false
+
+reproducibility:
+  random_seed: 20260909
+
+whole_cloud:
+  # 每个瓦片独立处理；默认 2 线程，按内存情况用 --workers 调整。
+  workers: 2
+  # Cross-tile merging uses projected alpha-shape footprints, not only XYZ AABBs.
+  footprint_max_points: 2000
+  merge_enabled: true
+  merge_normal_angle_deg: 5.0
+  merge_plane_offset_m: 0.08
+  merge_xy_gap_m: 0.30
+  merge_max_rms_m: 0.05
+
+# ROI 和单个瓦片内部的同向、共面、空间相邻平面片段合并。
+plane_merge:
+  enabled: true
+  normal_angle_deg: 8.0
+  plane_offset_m: 0.10
+  spatial_gap_m: 0.50
+  max_rms_m: 0.05
+  linkage: complete
+  hierarchical:
+    enabled: true
+    normal_angle_deg: 10.0
+    plane_offset_m: 0.10
+    spatial_gap_m: 0.75
+    max_rms_m: 0.05
+    max_rms_growth_ratio: 1.25
+    min_merged_rms_m: 0.02
+    linkage: complete
+
+validation:
+  stage: roi_functional_only
+  roi_confirmation: phase1_not_required
+  field_calibration: not_applicable
+
+output:
+  directory: null

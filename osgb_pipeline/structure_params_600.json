@@ -1,0 +1,25 @@
+{
+  "target": {
+    "min_structure_scale_m": 0.5,
+    "min_area_m2": 0.25,
+    "min_minor_extent_m": 0.15
+  },
+  "density": {
+    "target_raw_density_points_m2": 600,
+    "expected_retention_ratio": 0.70,
+    "equivalent_spacing_m": 0.040824829
+  },
+  "quality": {
+    "reject_below_effective_points": 25,
+    "min_effective_points": 100,
+    "high_quality_points": 200,
+    "min_local_density_p10_points_m2": 400,
+    "min_local_density_median_points_m2": 600
+  },
+  "definitions": {
+    "dip_direction": "north_clockwise_degrees",
+    "dip_angle": "degrees_0_to_90",
+    "trace_length": "visible_trace_only_null_if_not_observable",
+    "spacing": "normal_distance_between_adjacent_parallel_planes"
+  }
+}
