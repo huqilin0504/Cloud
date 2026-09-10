@@ -7,6 +7,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
+import laspy
 import numpy as np
 
 
@@ -28,6 +29,23 @@ REQUIRED_FILES = (
     "plane_boundaries.geojson",
     "trace_lines.geojson",
     "run_config.yaml",
+)
+
+WHOLE_CLOUD_REQUIRED_FILES = (
+    "detachment_planes.csv",
+    "joint_planes.csv",
+    "joint_sets.csv",
+    "spacings.csv",
+    "tile_spacings.csv",
+    "traces.csv",
+    "aperture.csv",
+    "whole_cloud_report.json",
+    "run.json",
+    "data_audit.json",
+    "density_report.json",
+    "run_config.yaml",
+    "processing_state.json",
+    "split_state.json",
 )
 
 
@@ -54,6 +72,8 @@ def _ply_vertex_count(path: Path) -> tuple[int, int]:
 
 
 def validate_output(output_dir: Path) -> dict[str, Any]:
+    if (output_dir / "whole_cloud_report.json").is_file() and not (output_dir / "report.json").is_file():
+        return validate_whole_cloud_output(output_dir)
     missing = [name for name in REQUIRED_FILES if not (output_dir / name).is_file()]
     if missing:
         raise ValueError(f"缺少输出文件：{missing}")
@@ -145,6 +165,80 @@ def validate_output(output_dir: Path) -> dict[str, Any]:
         "density_median_points_m2": float(density["median_points_m2"]),
         "validation_stage": report["validation"]["stage"],
         "field_calibration": report["validation"]["field_calibration"],
+    }
+
+
+def validate_whole_cloud_output(output_dir: Path) -> dict[str, Any]:
+    """Validate the cross-tile tables and state produced by whole-cloud runs."""
+
+    missing = [name for name in WHOLE_CLOUD_REQUIRED_FILES if not (output_dir / name).is_file()]
+    if missing:
+        raise ValueError(f"缺少全点云输出文件：{missing}")
+    report = json.loads((output_dir / "whole_cloud_report.json").read_text(encoding="utf-8"))
+    counts = report.get("counts")
+    tiling = report.get("tiling")
+    if not isinstance(counts, dict) or not isinstance(tiling, dict):
+        raise ValueError("whole_cloud_report.json 缺少 counts 或 tiling")
+    if report.get("detachment", {}).get("status") != "geometry_only_candidate":
+        raise ValueError("全点云 detachment.status 不受支持")
+
+    def read_rows(name: str) -> list[dict[str, str]]:
+        return _read_csv(output_dir / name)
+
+    tile_planes = read_rows("detachment_planes.csv")
+    global_planes = read_rows("joint_planes.csv")
+    joint_sets = read_rows("joint_sets.csv")
+    spacings = read_rows("spacings.csv")
+    tile_spacings = read_rows("tile_spacings.csv")
+    traces = read_rows("traces.csv")
+    aperture = read_rows("aperture.csv")
+    expected_counts = {
+        "candidate_plane_instances": len(tile_planes),
+        "global_joint_plane_count": len(global_planes),
+        "global_joint_set_count": len(joint_sets),
+        "spacing_rows": len(spacings),
+        "tile_spacing_rows": len(tile_spacings),
+    }
+    for field, actual in expected_counts.items():
+        if int(counts.get(field, -1)) != actual:
+            raise ValueError(f"{field} 与输出表行数不一致")
+    if len(traces) != len(global_planes) or len(aperture) != len(global_planes):
+        raise ValueError("traces.csv/aperture.csv 必须覆盖每个全局平面")
+    global_ids = [row.get("global_plane_id", "") for row in global_planes]
+    if len(global_ids) != len(set(global_ids)):
+        raise ValueError("joint_planes.csv 存在重复 global_plane_id")
+    if int(tiling.get("failed_tiles", -1)) < 0 or int(tiling.get("processed_tiles", -1)) < 0:
+        raise ValueError("tiling 处理计数不能为负数")
+
+    data_audit = json.loads((output_dir / "data_audit.json").read_text(encoding="utf-8"))
+    if int(data_audit.get("point_count", -1)) != int(counts.get("source_points", -2)):
+        raise ValueError("data_audit.json 与全点云 source_points 不一致")
+    state = json.loads((output_dir / "processing_state.json").read_text(encoding="utf-8"))
+    if state.get("algorithm_version") != report.get("algorithm_version"):
+        raise ValueError("processing_state.json 与报告算法版本不一致")
+    done_states = [value for value in state.get("tiles", {}).values() if value.get("status") == "done"]
+    if len(done_states) != int(tiling.get("processed_tiles", -1)):
+        raise ValueError("processing_state.json 与 processed_tiles 不一致")
+
+    overlay_value = report.get("detachment", {}).get("overlay")
+    overlay_path = output_dir / Path(str(overlay_value)).name if overlay_value else None
+    merged_points = int(counts.get("merged_overlay_points", 0))
+    if merged_points and (overlay_path is None or not overlay_path.is_file()):
+        raise ValueError("报告声明有候选叠加点，但 candidate_detachment_points.laz 不存在")
+    if overlay_path is not None and overlay_path.is_file():
+        with laspy.open(overlay_path) as reader:
+            if int(reader.header.point_count) != merged_points:
+                raise ValueError("候选叠加层点数与报告不一致")
+    return {
+        "status": "PASS",
+        "tile_plane_rows": len(tile_planes),
+        "global_plane_rows": len(global_planes),
+        "joint_set_rows": len(joint_sets),
+        "spacing_rows": len(spacings),
+        "tile_spacing_rows": len(tile_spacings),
+        "processed_tiles": int(tiling["processed_tiles"]),
+        "failed_tiles": int(tiling["failed_tiles"]),
+        "candidate_overlay_points": merged_points,
     }
 
 
