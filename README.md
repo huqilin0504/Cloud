@@ -26,6 +26,8 @@ python3 main.py --help
 python3 main.py roi --input path/to/cloud.las \
   --bbox xmin,xmax,ymin,ymax --output outputs/example
 python3 main.py validate outputs/example
+# ROI 和全点云输出均可使用同一验收入口
+python3 main.py validate outputs/whole_cloud_joint_planes
 ```
 
 全点云流程会保留 `split_state.json`、`processing_state.json` 和瓦片报告，可用

@@ -104,6 +104,12 @@ CloudCompare \
 `candidate_plane_instances` 是局部合并后的瓦片节理面实例总数；每个瓦片报告的 `plane_merge` 记录块内合并前后的数量；`global_joint_plane_count` 是当前几何门限下的跨瓦片合并数量。`run.json` 的 `tiling.parallel_mode=thread_pool` 和 `workers` 记录实际并行配置。
 `joint_planes.csv` 中一行对应一个全局合并节理面，`detachment_planes.csv` 仍保留瓦片实例，便于追溯合并来源。
 
+全点云结果可直接用统一验收入口检查表行数、状态、点数和候选 LAZ：
+
+```bash
+python3 main.py validate outputs/whole_cloud_joint_planes
+```
+
 `detachment_planes.csv` 包含每个候选节理面的倾向、倾角、迹长字段、观测平面延伸、
 最近间距和 `center_x/center_y/center_z` ENU 中心坐标。当前 `trace_length_m`
 在没有独立暴露面迹线时为 `null`，`apparent_persistence_m` 才是本次点云直接
