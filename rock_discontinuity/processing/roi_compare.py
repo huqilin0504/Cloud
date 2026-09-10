@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-import argparse
-import csv
-import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from ..config import dump_config, load_config
+from ..config import dump_config
+from ..io.roi_compare_output import (
+    read_csv_rows,
+    read_json_report,
+    write_comparison_summary,
+    write_experiment_report,
+)
 from .pipeline import run_las
 
 
@@ -38,17 +41,6 @@ def _variant_config(config: dict[str, Any], variant: str) -> dict[str, Any]:
     return value
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _read_csv(path: Path) -> list[dict[str, str]]:
-    if not path.is_file():
-        return []
-    with path.open(newline="", encoding="utf-8") as stream:
-        return list(csv.DictReader(stream))
-
-
 def _quantile(values: list[float], quantile: float) -> float | None:
     if not values:
         return None
@@ -58,11 +50,11 @@ def _quantile(values: list[float], quantile: float) -> float | None:
 
 
 def _summary_row(roi_name: str, bbox: dict[str, float], variant: str, output_dir: Path) -> dict[str, Any]:
-    report = _read_json(output_dir / "report.json")
+    report = read_json_report(output_dir / "report.json")
     counts = report.get("counts", {})
     input_points = int(counts.get("input_points", 0))
     candidate_points = int(report.get("detachment", {}).get("candidate_point_count", 0))
-    plane_rows = _read_csv(output_dir / "planes.csv")
+    plane_rows = read_csv_rows(output_dir / "planes.csv")
     stability_values = [
         float(row["normal_stability_deg"])
         for row in plane_rows
@@ -78,35 +70,12 @@ def _summary_row(roi_name: str, bbox: dict[str, float], variant: str, output_dir
         "candidate_joint_planes": int(counts.get("candidate_joint_planes", 0)),
         "candidate_points": candidate_points,
         "candidate_fraction": candidate_points / input_points if input_points else None,
-        "joint_set_count": len(_read_csv(output_dir / "joint_sets.csv")),
-        "spacing_rows": len(_read_csv(output_dir / "spacings.csv")),
+        "joint_set_count": len(read_csv_rows(output_dir / "joint_sets.csv")),
+        "spacing_rows": len(read_csv_rows(output_dir / "spacings.csv")),
         "normal_stability_p50_deg": _quantile(stability_values, 0.50),
         "normal_stability_p90_deg": _quantile(stability_values, 0.90),
         "output_dir": str(output_dir),
     }
-
-
-def _write_summary(output_root: Path, rows: list[dict[str, Any]], input_path: Path) -> dict[str, Any]:
-    fields = list(rows[0].keys()) if rows else []
-    summary_csv = output_root / "roi_comparison.csv"
-    with summary_csv.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
-    summary = {
-        "suite": "three_roi_multiscale_hierarchical_ablation",
-        "input": str(input_path),
-        "rois": DEFAULT_ROIS,
-        "roi_inputs": DEFAULT_ROI_INPUTS,
-        "variants": VARIANTS,
-        "rows": rows,
-        "summary_csv": str(summary_csv),
-    }
-    (output_root / "roi_comparison.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return summary
 
 
 def summarize_existing(output_root: Path, input_path: Path) -> dict[str, Any]:
@@ -116,7 +85,14 @@ def summarize_existing(output_root: Path, input_path: Path) -> dict[str, Any]:
         for roi_name, bbox in DEFAULT_ROIS.items()
         for variant in VARIANTS
     ]
-    return _write_summary(output_root, rows, input_path.expanduser().resolve())
+    return write_comparison_summary(
+        output_root,
+        rows,
+        input_path.expanduser().resolve(),
+        rois=DEFAULT_ROIS,
+        roi_inputs=DEFAULT_ROI_INPUTS,
+        variants=VARIANTS,
+    )
 
 
 def run_comparison(input_path: Path, output_root: Path, config: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
@@ -144,34 +120,35 @@ def run_comparison(input_path: Path, output_root: Path, config: dict[str, Any], 
             print(f"[roi-compare] {roi_name} / {variant}", flush=True)
             run_las(roi_input, output_dir, variant_config, bbox)
             report_path = output_dir / "report.json"
-            report = _read_json(report_path)
+            report = read_json_report(report_path)
             report["experiment"] = variant_config["experiment"]
             report["roi_name"] = roi_name
-            report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            write_experiment_report(report_path, report)
             rows.append(_summary_row(roi_name, bbox, variant, output_dir))
-    return _write_summary(output_root, rows, input_path)
+    return write_comparison_summary(
+        output_root,
+        rows,
+        input_path,
+        rois=DEFAULT_ROIS,
+        roi_inputs=DEFAULT_ROI_INPUTS,
+        variants=VARIANTS,
+    )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="比较三个典型ROI的多尺度法向和层次合并消融结果")
-    parser.add_argument("--input", type=Path, default=Path("outputs/whole_cloud_detachment/source_tiles/tile_7_22.laz"))
-    parser.add_argument("--output", type=Path, default=Path("outputs/roi_compare_v23"))
-    parser.add_argument("--config", type=Path, default=Path(__file__).resolve().parents[1] / "config/default.yaml")
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("--summarize-existing", action="store_true")
-    return parser
+def build_parser(*args: Any, **kwargs: Any):
+    """Compatibility wrapper; parser construction lives in ``app``."""
+
+    from ..app.roi_compare import build_parser as app_build_parser
+
+    return app_build_parser(*args, **kwargs)
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    if args.summarize_existing:
-        summary = summarize_existing(args.output, args.input)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
-        return 0
-    config = load_config(args.config if args.config.exists() else None)
-    summary = run_comparison(args.input, args.output, config, force=args.force)
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return 0
+    """Compatibility command wrapper with a function-local import."""
+
+    from ..app.roi_compare import main as app_main
+
+    return app_main(argv)
 
 
 if __name__ == "__main__":

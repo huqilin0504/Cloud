@@ -5,6 +5,9 @@
 `outputs/refactor_validation/20260910_system_closeout-20260910/`，包括固定种子 42 的合成输入校验清单、ROI
 结果、四瓦片全点云并行结果、串行结果、恢复运行结果和 `source_snapshot.tar.gz` 源码快照。
 此前的 `20260910_system_final/` 保留为上一阶段的独立批次，没有被覆盖。
+本轮局部解耦收尾以当前工作区和上述合成结果为对照，新增验证产物放在
+`outputs/refactor_validation/20260910_local_finish/`；`pointcloud_joint_extraction/` 是未跟踪的独立目录，
+本轮未读取、修改或纳管。
 
 ## 当前环境
 
@@ -37,6 +40,10 @@ python3 -m pip check
   `io/output.py` 与 `io/whole_cloud_output.py` 只序列化已经准备好的记录。
 - `processing/state.py` 统一状态版本、分块计划兼容检查、原子保存和瓦片完成/失败标记；
   全局候选质量门槛位于 `processing/global_aggregation.py`，避免主流程继续持有这些规则。
+- `GlobalAggregationResult` 统一承载跨瓦片合并、方向组、候选复判、间距和编号映射；
+  `processing/whole_cloud_reporting.py` 只准备报告与覆盖层筛选映射，不执行写盘。
+- ROI 比较的命令解析位于 `app/roi_compare.py`，汇总读写位于 `io/roi_compare_output.py`；
+  `processing/roi_compare.py` 保留实验执行、统计和历史兼容包装。
 - YAML 是默认配置唯一来源；`footprint_max_points` 的默认值、缺失字段回退和显式覆盖均由
   回归测试固定。根入口和 `rock-discontinuity` 默认全点云，包入口保留 ROI 默认行为。
 
@@ -51,7 +58,7 @@ python3 main.py --help
 python3 -m rock_discontinuity --help
 ```
 
-当前结果：识别测试 `44 passed`；两个转换回归脚本均输出 `PASS`；编译和四个帮助入口退出码
+当前结果：本轮识别测试 `45 passed`；两个转换回归脚本均输出 `PASS`；编译和四个帮助入口退出码
 均为 0。架构契约测试同时解析绝对和相对导入，确认 `core` 不依赖 `processing/io/app`，
 `io` 不依赖 `processing/app`。
 
@@ -113,7 +120,6 @@ whole-cloud 小样本运行；四条路由均成功，YAML `default.yaml` 可从
 
 ## Git 状态
 
-当前 Git 身份已经存在（`huqilin <97706693@qq.com>`），但 `.git` 目录无法创建 `index.lock`
-（只读挂载），且没有历史提交。因此本次只能保存工作区
-源码和验证产物，不能执行计划要求的本地暂存、分阶段提交或生成真实提交记录；待 Git 工作区
-可写且确认作者身份后，应先审查 `git add -n` 清单，再提交当前基线和后续阶段。
+当前 Git 身份为 `huqilin <97706693@qq.com>`。本轮提交只包含识别源码、测试和文档；
+未跟踪的 `pointcloud_joint_extraction/` 与 `outputs/` 均未纳管。提交记录以 `git log` 为准，
+不推送远端。

@@ -11,7 +11,7 @@ from collections.abc import Callable, Sequence
 
 from ..cli import main as roi_main
 from .whole_cloud import main as whole_cloud_main
-from ..processing.roi_compare import main as roi_compare_main
+from .roi_compare import main as roi_compare_main
 from ..validation.validate import main as validate_main
 
 
