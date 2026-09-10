@@ -21,6 +21,7 @@ from rock_discontinuity.processing.global_aggregation import (
     merge_plane_rows as _merge_plane_rows,
 )
 from rock_discontinuity.processing.state import (
+    atomic_json as _atomic_json,
     invalid_source_tiles as _invalid_source_tiles,
     load_processing_state as _load_processing_state,
     mark_tile_done as _mark_tile_done,
@@ -84,6 +85,13 @@ class WholeCloudTilingTests(unittest.TestCase):
             header = laspy.LasHeader(point_format=3, version="1.2")
             laspy.LasData(header).write(tile)
             self.assertEqual(_invalid_source_tiles([tile]), [tile])
+
+    def test_processing_state_write_is_atomic_and_leaves_no_temp_file(self):
+        with tempfile.TemporaryDirectory(prefix="whole-cloud-atomic-") as directory:
+            path = Path(directory) / "processing_state.json"
+            _atomic_json(path, {"algorithm_version": "test-v1", "tiles": {}})
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["tiles"], {})
+            self.assertFalse(path.with_name(path.name + ".tmp").exists())
 
     def test_old_processing_state_without_plan_remains_readable(self):
         plan = {
