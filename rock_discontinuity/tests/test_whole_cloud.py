@@ -16,6 +16,7 @@ from rock_discontinuity.io.las_tiles import write_red_overlay as _write_red_over
 from rock_discontinuity.io.las_tiles import merge_overlays as _merge_overlays_io
 from rock_discontinuity.processing.global_aggregation import (
     aggregate_global_planes as _aggregate_global_planes,
+    aggregate_global_results as _aggregate_global_results,
     apply_global_candidate_gate as _apply_global_candidate_gate,
     global_orientation_sets as _global_orientation_sets,
     merge_plane_rows as _merge_plane_rows,
@@ -207,6 +208,12 @@ class WholeCloudTilingTests(unittest.TestCase):
         set_ids = _global_orientation_sets(groups, load_config(None))
         global_rows = _aggregate_global_planes(groups, set_ids, load_config(None))
         self.assertEqual(len(global_rows), 2)
+
+        aggregate = _aggregate_global_results(rows, {"overlap_m": 1.0}, load_config(None))
+        self.assertEqual(len(aggregate.all_global_plane_rows), 2)
+        self.assertEqual(len(aggregate.global_plane_rows), len(aggregate.selected_global_ids))
+        self.assertTrue(set(aggregate.global_set_ids).issubset(set(aggregate.plane_groups)))
+        self.assertEqual(aggregate.merged_plane_rows[0]["global_plane_id"], merged[0]["global_plane_id"])
 
     def test_global_candidate_gate_uses_aggregated_quality_rows(self):
         rows = [

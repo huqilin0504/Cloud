@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from sklearn.cluster import DBSCAN
 
 from ..core.fitting import confidence_score, dip_and_dip_direction, quality_grade
 from ..core.geometry import footprint_geometry_on_plane, normal_angle_deg, normal_angle_matrix
-from ..core.models import PlaneInstance
+from ..core.models import (
+    GlobalAggregationResult,
+    GlobalJointSetRecord,
+    GlobalPlaneRecord,
+    SelectionRecord,
+    SpacingRecord,
+    TilePlaneRecord,
+    PlaneInstance,
+)
+from ..core.records import nearest_spacing_by_plane
 from .aggregation import (
     planes_can_merge_rows,
     row_bbox,
@@ -21,10 +30,10 @@ from .aggregation import (
 
 
 def merge_plane_rows(
-    rows: list[dict[str, Any]],
+    rows: list[TilePlaneRecord],
     plan: dict[str, Any],
     config: dict[str, Any],
-) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, str]]:
+) -> tuple[list[TilePlaneRecord], dict[str, list[TilePlaneRecord]], dict[str, str]]:
     """Merge plane instances touching neighbouring tile boundaries."""
 
     rows = [dict(row) for row in rows]
@@ -98,7 +107,7 @@ def merge_plane_rows(
     for index in range(len(rows)):
         root_members[find(index)].append(index)
     ordered_members = sorted(root_members.values(), key=lambda members: min(members))
-    groups: dict[str, list[dict[str, Any]]] = {}
+    groups: dict[str, list[TilePlaneRecord]] = {}
     old_to_global: dict[str, str] = {}
     for group_index, members in enumerate(ordered_members, start=1):
         global_id = f"GJ-{group_index:05d}"
@@ -116,7 +125,7 @@ def merge_plane_rows(
 
 
 def global_orientation_sets(
-    groups: dict[str, list[dict[str, Any]]],
+    groups: dict[str, list[TilePlaneRecord]],
     config: dict[str, Any],
 ) -> dict[str, str]:
     if not groups:
@@ -164,11 +173,11 @@ def global_orientation_sets(
 
 
 def aggregate_global_planes(
-    groups: dict[str, list[dict[str, Any]]],
+    groups: dict[str, list[TilePlaneRecord]],
     global_set_ids: dict[str, str],
     config: dict[str, Any],
-) -> list[dict[str, Any]]:
-    global_rows: list[dict[str, Any]] = []
+) -> list[GlobalPlaneRecord]:
+    global_rows: list[GlobalPlaneRecord] = []
     for global_id in sorted(groups):
         members = groups[global_id]
         representative = max(members, key=lambda row: row_float(row, "core_red_points") or 0.0)
@@ -347,9 +356,9 @@ def aggregate_global_planes(
 
 
 def apply_global_candidate_gate(
-    global_plane_rows: list[dict[str, Any]],
+    global_plane_rows: list[GlobalPlaneRecord],
     config: dict[str, Any],
-) -> tuple[set[str], dict[str, dict[str, Any]]]:
+) -> tuple[set[str], dict[str, SelectionRecord]]:
     """Apply the existing global candidate gate to aggregated plane rows."""
 
     from .detachment import classify_candidate_joint_planes
@@ -376,21 +385,21 @@ def apply_global_candidate_gate(
         for row, selected in zip(global_plane_rows, global_selected)
         if selected
     }
-    selection_by_id = {
+    selection_by_id: dict[str, SelectionRecord] = {
         str(row["plane_id"]): row for row in global_selection_rows
     }
     return selected_global_ids, selection_by_id
 
 
 def global_spacing_and_sets(
-    global_rows: list[dict[str, Any]],
+    global_rows: list[GlobalPlaneRecord],
     config: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    by_set: dict[str, list[dict[str, Any]]] = defaultdict(list)
+) -> tuple[list[SpacingRecord], list[GlobalJointSetRecord]]:
+    by_set: dict[str, list[GlobalPlaneRecord]] = defaultdict(list)
     for row in global_rows:
         by_set[str(row["global_set_id"])].append(row)
-    spacing_rows: list[dict[str, Any]] = []
-    joint_rows: list[dict[str, Any]] = []
+    spacing_rows: list[SpacingRecord] = []
+    joint_rows: list[GlobalJointSetRecord] = []
     min_planes = int(config.get("joint_sets", {}).get("min_planes", 3))
     for set_id in sorted(by_set):
         members = by_set[set_id]
@@ -412,7 +421,7 @@ def global_spacing_and_sets(
             dtype=np.float64,
         )
         mean_dip_direction, mean_dip = dip_and_dip_direction(mean_normal)
-        local_rows: list[dict[str, Any]] = []
+        local_rows: list[SpacingRecord] = []
         spacings: list[float] = []
         x0 = np.mean(
             [
@@ -425,7 +434,7 @@ def global_spacing_and_sets(
             ],
             axis=0,
         )
-        parameters: list[tuple[float, dict[str, Any]]] = []
+        parameters: list[tuple[float, GlobalPlaneRecord]] = []
         for row in members:
             normal = row_normal(row)
             d_value = row_float(row, "plane_d")
@@ -457,7 +466,7 @@ def global_spacing_and_sets(
             )
         spacing_rows.extend(local_rows)
         set_spacing = np.asarray(spacings, dtype=np.float64)
-        stats: dict[str, Any] = {
+        stats: GlobalJointSetRecord = {
             "set_id": set_id,
             "plane_count": len(members),
             "mean_dip_direction_deg": mean_dip_direction,
@@ -507,3 +516,62 @@ def global_spacing_and_sets(
         )
         joint_rows.append(stats)
     return spacing_rows, joint_rows
+
+
+def aggregate_global_results(
+    all_plane_rows: list[TilePlaneRecord],
+    plan: dict[str, Any],
+    config: dict[str, Any],
+) -> GlobalAggregationResult:
+    """Run the complete global aggregation stage without performing I/O.
+
+    This is the typed boundary used by the whole-cloud orchestrator.  The
+    lower-level functions remain public for compatibility and for focused
+    geometry tests; this function only preserves their existing order and
+    joins their outputs into one named result object.
+    """
+
+    merged_rows, plane_groups, old_to_global = merge_plane_rows(
+        all_plane_rows,
+        plan,
+        config,
+    )
+    provisional_set_ids = global_orientation_sets(plane_groups, config)
+    for row in merged_rows:
+        row["global_set_id"] = provisional_set_ids.get(str(row["global_plane_id"]))
+    all_global_rows = aggregate_global_planes(plane_groups, provisional_set_ids, config)
+    selected_global_ids, selection_by_id = apply_global_candidate_gate(
+        all_global_rows,
+        config,
+    )
+    for row in merged_rows:
+        selection = selection_by_id.get(str(row["global_plane_id"]), {})
+        row["status"] = selection.get("status", "not_selected")
+        row["selection_reason"] = selection.get("selection_reason", "global_gate_missing")
+
+    selected_groups = {
+        key: value for key, value in plane_groups.items() if key in selected_global_ids
+    }
+    global_set_ids = global_orientation_sets(selected_groups, config)
+    global_rows = aggregate_global_planes(selected_groups, global_set_ids, config)
+    spacing_rows, joint_set_rows = global_spacing_and_sets(global_rows, config)
+    nearest_spacing = nearest_spacing_by_plane(spacing_rows)
+    for row in merged_rows:
+        row["nearest_spacing_m"] = nearest_spacing.get(str(row["global_plane_id"]))
+    for row in global_rows:
+        row["nearest_spacing_m"] = nearest_spacing.get(str(row["global_plane_id"]))
+
+    return GlobalAggregationResult(
+        merged_plane_rows=cast(list[TilePlaneRecord], merged_rows),
+        plane_groups=cast(dict[str, list[TilePlaneRecord]], plane_groups),
+        old_to_global=old_to_global,
+        provisional_set_ids=provisional_set_ids,
+        all_global_plane_rows=cast(list[GlobalPlaneRecord], all_global_rows),
+        selected_global_ids=selected_global_ids,
+        selection_by_id=cast(dict[str, SelectionRecord], selection_by_id),
+        global_set_ids=global_set_ids,
+        global_plane_rows=cast(list[GlobalPlaneRecord], global_rows),
+        spacing_rows=cast(list[SpacingRecord], spacing_rows),
+        joint_set_rows=cast(list[GlobalJointSetRecord], joint_set_rows),
+        nearest_spacing_by_plane=nearest_spacing,
+    )

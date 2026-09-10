@@ -12,6 +12,8 @@ from rock_discontinuity.core.models import (
     ProcessingResult,
     SegmentationResult,
     TileResult,
+    spacing_record_from_json,
+    tile_plane_record_from_json,
 )
 from rock_discontinuity.processing.tiling import core_mask, grid_plan
 from rock_discontinuity.processing.whole_cloud_contract import (
@@ -45,6 +47,14 @@ class RefactorContractTests(unittest.TestCase):
     def test_typed_result_contracts_exist(self):
         self.assertTrue(hasattr(ProcessingResult, "as_legacy_dict"))
         self.assertEqual(list(TileResult({"status": "done"}, [], [])), [{"status": "done"}, [], []])
+
+    def test_recovered_rows_keep_missing_fields_and_reject_non_objects(self):
+        tile = tile_plane_record_from_json({"tile_id": "0_0", "plane_id": "J1"})
+        spacing = spacing_record_from_json({"spacing_m": None})
+        self.assertEqual(tile, {"tile_id": "0_0", "plane_id": "J1"})
+        self.assertEqual(spacing, {"spacing_m": None})
+        with self.assertRaises(TypeError):
+            tile_plane_record_from_json([])  # type: ignore[arg-type]
 
     def test_legacy_result_wrapper_keeps_array_references(self):
         points = np.zeros((3, 3), dtype=float)
@@ -102,24 +112,65 @@ class RefactorContractTests(unittest.TestCase):
         self.assertTrue(left[1])
 
     @staticmethod
-    def _resolved_imports(path: Path):
-        """Resolve absolute and relative imports to package-qualified names."""
-
+    def _module_name(path: Path) -> str:
         package_root = Path(__file__).parents[1]
-        module_parts = ["rock_discontinuity", *path.relative_to(package_root).with_suffix("").parts]
-        module_name = ".".join(module_parts)
-        package_parts = module_name.rsplit(".", 1)[0].split(".")
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
+        relative = path.relative_to(package_root)
+        parts = ("rock_discontinuity", *relative.with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        return ".".join(parts)
+
+    @classmethod
+    def _resolved_imports_from_tree(
+        cls,
+        tree: ast.AST,
+        module_name: str,
+        module_paths: set[str],
+        *,
+        module_level_only: bool = True,
+    ):
+        """Resolve absolute and relative imports to existing package modules."""
+
+        if module_name.rsplit(".", 1)[-1] == "__init__":
+            package_parts = module_name.rsplit(".", 1)[0].split(".")
+        else:
+            package_parts = module_name.rsplit(".", 1)[0].split(".")
+        nodes = tree.body if module_level_only else ast.walk(tree)
+        for node in nodes:
             if isinstance(node, ast.Import):
-                yield from (alias.name for alias in node.names)
+                for alias in node.names:
+                    if alias.name in module_paths:
+                        yield alias.name
             elif isinstance(node, ast.ImportFrom):
                 if node.level == 0:
-                    yield node.module or ""
-                    continue
-                base = package_parts[: -(node.level - 1)] if node.level > 1 else package_parts
-                target = [*base, *(node.module.split(".") if node.module else [])]
-                yield ".".join(target)
+                    base = node.module or ""
+                else:
+                    base_parts = package_parts[: -(node.level - 1)] if node.level > 1 else package_parts
+                    base = ".".join([*base_parts, *(node.module.split(".") if node.module else [])])
+                if base in module_paths:
+                    yield base
+                for alias in node.names:
+                    candidate = f"{base}.{alias.name}" if base else alias.name
+                    if candidate in module_paths:
+                        yield candidate
+
+    @classmethod
+    def _resolved_imports(cls, path: Path, module_paths: set[str] | None = None):
+        package_root = Path(__file__).parents[1]
+        if module_paths is None:
+            module_paths = {
+                cls._module_name(item)
+                for item in package_root.rglob("*.py")
+                if "tests" not in item.parts and "__pycache__" not in item.parts
+            }
+        module_name = cls._module_name(path)
+        if path.name == "__init__.py":
+            module_name = f"{module_name}.__init__"
+        yield from cls._resolved_imports_from_tree(
+            ast.parse(path.read_text(encoding="utf-8")),
+            module_name,
+            module_paths,
+        )
 
     def test_core_and_io_layer_boundaries_include_relative_imports(self):
         package_root = Path(__file__).parents[1]
@@ -151,14 +202,12 @@ class RefactorContractTests(unittest.TestCase):
         for path in package_root.rglob("*.py"):
             if "tests" in path.parts or "__pycache__" in path.parts:
                 continue
-            module = ".".join(
-                ["rock_discontinuity", *path.relative_to(package_root).with_suffix("").parts]
-            )
+            module = self._module_name(path)
             module_paths[module] = path
         graph = {
             module: {
                 imported
-                for imported in self._resolved_imports(path)
+                for imported in self._resolved_imports(path, set(module_paths))
                 if imported in module_paths
             }
             for module, path in module_paths.items()
@@ -179,6 +228,38 @@ class RefactorContractTests(unittest.TestCase):
 
         for module in graph:
             visit(module)
+
+    def test_import_resolver_handles_package_modules_and_aliases(self):
+        module_paths = {
+            "rock_discontinuity.pkg",
+            "rock_discontinuity.pkg.child",
+            "rock_discontinuity.other",
+        }
+        imports = set(
+            self._resolved_imports_from_tree(
+                ast.parse(
+                    "from . import child\n"
+                    "from ..other import value\n"
+                    "def load():\n"
+                    "    from . import delayed\n"
+                ),
+                "rock_discontinuity.pkg.worker",
+                module_paths,
+            )
+        )
+        self.assertEqual(
+            imports,
+            {"rock_discontinuity.pkg", "rock_discontinuity.pkg.child", "rock_discontinuity.other"},
+        )
+        all_imports = set(
+            self._resolved_imports_from_tree(
+                ast.parse("def load():\n    from . import delayed\n"),
+                "rock_discontinuity.pkg.worker",
+                {"rock_discontinuity.pkg", "rock_discontinuity.pkg.delayed"},
+                module_level_only=False,
+            )
+        )
+        self.assertIn("rock_discontinuity.pkg.delayed", all_imports)
 
     def test_io_modules_only_serialize_prepared_records(self):
         io_root = Path(__file__).parents[1] / "io"

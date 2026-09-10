@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias, TypedDict
+from collections.abc import Mapping
+from typing import Any, TypeAlias, TypedDict, cast
 
 import numpy as np
 
@@ -22,9 +23,12 @@ class PlaneMergeRecord(TypedDict, total=False):
 
 
 class SpacingRecord(TypedDict, total=False):
+    tile_id: str
     set_id: str
     plane_id_a: str
     plane_id_b: str
+    global_plane_id_a: str
+    global_plane_id_b: str
     spacing_m: float
     method: str
     sample_count: int
@@ -138,14 +142,79 @@ class TilePlaneRecord(PlaneRecord, total=False):
 class GlobalPlaneRecord(PlaneRecord, total=False):
     global_plane_id: str
     global_set_id: str | None
+    center_x: float | None
+    center_y: float | None
+    center_z: float | None
     tile_count: int
     instance_count: int
     observed_area_sum_m2: float | None
     max_instance_area_m2: float | None
+    nearest_spacing_m: float | None
     core_red_points: int
     tile_id: str
     global_instance_count: int
     global_tile_count: int
+
+
+class SelectionRecord(TypedDict, total=False):
+    """Candidate-gate decision for one global plane."""
+
+    plane_id: str
+    status: str
+    selection_reason: str
+    selected: bool
+
+
+class GlobalJointSetRecord(TypedDict, total=False):
+    """Serialized orientation-family and spacing summary."""
+
+    set_id: str
+    plane_count: int
+    mean_dip_direction_deg: float | None
+    mean_dip_deg: float | None
+    mean_normal_x: float
+    mean_normal_y: float
+    mean_normal_z: float
+    angular_dispersion_deg: float | None
+    spacing_available: bool
+    spacing_reason: str | None
+    mean_spacing_m: float | None
+    median_spacing_m: float | None
+    std_spacing_m: float | None
+    min_spacing_m: float | None
+    max_spacing_m: float | None
+    p10_spacing_m: float | None
+    p90_spacing_m: float | None
+    spacing_3d_sample_count: int
+    spacing_virtual_scanline_sample_count: int
+    mean_spacing_3d_m: float | None
+    median_spacing_3d_m: float | None
+    mean_spacing_virtual_scanline_m: float | None
+    median_spacing_virtual_scanline_m: float | None
+    fisher_k: float | None
+
+
+@dataclass
+class GlobalAggregationResult:
+    """All computed global-stage records before file serialization.
+
+    The fields deliberately retain dictionaries because tile reports and
+    external JSON are compatibility formats.  The dataclass makes the stage
+    boundary explicit and prevents callers from depending on tuple order.
+    """
+
+    merged_plane_rows: list[TilePlaneRecord]
+    plane_groups: dict[str, list[TilePlaneRecord]]
+    old_to_global: dict[str, str]
+    provisional_set_ids: dict[str, str]
+    all_global_plane_rows: list[GlobalPlaneRecord]
+    selected_global_ids: set[str]
+    selection_by_id: dict[str, SelectionRecord]
+    global_set_ids: dict[str, str]
+    global_plane_rows: list[GlobalPlaneRecord]
+    spacing_rows: list[SpacingRecord]
+    joint_set_rows: list[GlobalJointSetRecord]
+    nearest_spacing_by_plane: dict[str, float]
 
 
 class TraceRecord(TypedDict, total=False):
@@ -338,6 +407,22 @@ def finite_or_none(value: float | int | None) -> float | int | None:
     if isinstance(value, (float, np.floating)) and not np.isfinite(value):
         return None
     return value
+
+
+def tile_plane_record_from_json(value: Mapping[str, Any]) -> TilePlaneRecord:
+    """Convert one recovered tile-report row without inventing fields."""
+
+    if not isinstance(value, Mapping):
+        raise TypeError("瓦片平面记录必须是 JSON 对象")
+    return cast(TilePlaneRecord, dict(value))
+
+
+def spacing_record_from_json(value: Mapping[str, Any]) -> SpacingRecord:
+    """Convert one recovered spacing row without changing missing values."""
+
+    if not isinstance(value, Mapping):
+        raise TypeError("间距记录必须是 JSON 对象")
+    return cast(SpacingRecord, dict(value))
 
 
 def plane_to_row(plane: PlaneInstance) -> PlaneRecord:
