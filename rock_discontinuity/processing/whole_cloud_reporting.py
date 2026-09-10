@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,8 +39,8 @@ def prepare_whole_cloud_report(
     failures: list[dict[str, Any]],
     all_spacing_rows: list[SpacingRecord],
     aggregation: GlobalAggregationResult,
+    selected_plane_indices_by_tile: dict[str, set[int]],
     output_dir: Path,
-    overlay_dir: Path,
     merged_overlay: Path,
     merged_overlay_points: int,
     worker_count: int,
@@ -53,13 +52,6 @@ def prepare_whole_cloud_report(
     total_red = sum(int(report["counts"]["candidate_red_points"]) for report in done_reports)
     total_core = sum(int(report["counts"]["core_points"]) for report in done_reports)
     total_input = sum(int(report["counts"]["input_points"]) for report in done_reports)
-    selected_plane_indices_by_tile: dict[str, set[int]] = defaultdict(set)
-    for row in aggregation.merged_plane_rows:
-        if str(row["global_plane_id"]) in aggregation.selected_global_ids:
-            selected_plane_indices_by_tile[str(row["tile_id"])].add(
-                int(row["tile_plane_index"])
-            )
-
     report = {
         "version": WHOLE_ALGORITHM_VERSION,
         "algorithm_version": WHOLE_ALGORITHM_VERSION,
@@ -143,4 +135,21 @@ def prepare_whole_cloud_report(
     )
 
 
-__all__ = ["WholeCloudReportPreparation", "prepare_whole_cloud_report"]
+def prepare_selected_plane_indices_by_tile(
+    aggregation: GlobalAggregationResult,
+) -> dict[str, set[int]]:
+    """Build the overlay selection map without touching the filesystem."""
+
+    selected: dict[str, set[int]] = {}
+    for row in aggregation.merged_plane_rows:
+        if str(row["global_plane_id"]) not in aggregation.selected_global_ids:
+            continue
+        selected.setdefault(str(row["tile_id"]), set()).add(int(row["tile_plane_index"]))
+    return selected
+
+
+__all__ = [
+    "WholeCloudReportPreparation",
+    "prepare_selected_plane_indices_by_tile",
+    "prepare_whole_cloud_report",
+]

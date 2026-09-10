@@ -39,7 +39,7 @@ python3 -m rock_discontinuity.processing.roi_compare --help -> 0
 固定合成输入 `synthetic_tilted_planes.las`、同一配置和 `tile_size=4、overlap=0.5` 的前后对照位于：
 
 - 旧批次：`outputs/refactor_validation/20260910_system/whole_cloud/`
-- 本轮：`outputs/refactor_validation/20260910_local_finish/whole_tilted/`
+- 本轮：`outputs/refactor_validation/20260910_local_finish/whole_tilted2/`
 
 `detachment_planes.csv`、`joint_planes.csv`、`joint_sets.csv`、`spacings.csv` 和
 `tile_spacings.csv` 的行数及字段值完全一致；解码后的候选 LAZ 坐标、RGB 颜色和
@@ -55,6 +55,7 @@ python3 -m rock_discontinuity.processing.roi_compare --help -> 0
 
 - `f49b91f refactor: type global aggregation stage`
 - `4a1bce3 refactor: separate ROI comparison entrypoint`
+- 后续纯函数接口收尾提交见 `git log`。
 
 没有推送远端。当前 Git 工作区只保留用户未跟踪的 `pointcloud_joint_extraction/`，没有把它加入
 暂存或提交。

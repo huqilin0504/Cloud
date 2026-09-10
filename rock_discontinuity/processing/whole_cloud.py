@@ -45,7 +45,10 @@ from .state import (
     validate_tile_report_versions as _validate_tile_report_versions,
 )
 from .global_aggregation import aggregate_global_results
-from .whole_cloud_reporting import prepare_whole_cloud_report
+from .whole_cloud_reporting import (
+    prepare_selected_plane_indices_by_tile,
+    prepare_whole_cloud_report,
+)
 
 
 def _format_progress(stage: str, current: int, total: int, detail: str = "") -> str:
@@ -346,6 +349,14 @@ def run_whole_cloud(
 
     overlay_paths = sorted(overlay_dir.glob("tile_*.laz"), key=lambda path: _parse_tile_name(path))
     merged_overlay = output_dir / "candidate_detachment_points.laz"
+    selected_plane_indices_by_tile = prepare_selected_plane_indices_by_tile(aggregation)
+    merged_count = _merge_overlays(
+        overlay_paths,
+        merged_overlay,
+        source,
+        source_crs,
+        selected_plane_indices_by_tile,
+    )
     prepared_report = prepare_whole_cloud_report(
         source=source,
         plan=plan,
@@ -356,25 +367,15 @@ def run_whole_cloud(
         failures=failures,
         all_spacing_rows=all_spacing_rows,
         aggregation=aggregation,
+        selected_plane_indices_by_tile=selected_plane_indices_by_tile,
         output_dir=output_dir,
-        overlay_dir=overlay_dir,
         merged_overlay=merged_overlay,
-        merged_overlay_points=0,
+        merged_overlay_points=merged_count,
         worker_count=worker_count,
         max_tiles=max_tiles,
         config=config,
     )
-    selected_plane_indices_by_tile = prepared_report.selected_plane_indices_by_tile
-    merged_count = _merge_overlays(
-        overlay_paths,
-        merged_overlay,
-        source,
-        source_crs,
-        selected_plane_indices_by_tile,
-    )
     report = prepared_report.report
-    report["counts"]["candidate_red_points"] = int(merged_count)
-    report["counts"]["merged_overlay_points"] = int(merged_count)
     trace_rows = prepared_report.trace_rows
     aperture_rows = prepared_report.aperture_rows
     write_whole_cloud_outputs(
