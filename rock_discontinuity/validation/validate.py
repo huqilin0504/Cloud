@@ -179,7 +179,8 @@ def validate_whole_cloud_output(output_dir: Path) -> dict[str, Any]:
     tiling = report.get("tiling")
     if not isinstance(counts, dict) or not isinstance(tiling, dict):
         raise ValueError("whole_cloud_report.json 缺少 counts 或 tiling")
-    if report.get("detachment", {}).get("status") != "geometry_only_candidate":
+    detachment = report.get("detachment")
+    if not isinstance(detachment, dict) or detachment.get("status") != "geometry_only_candidate":
         raise ValueError("全点云 detachment.status 不受支持")
 
     def read_rows(name: str) -> list[dict[str, str]]:
@@ -216,11 +217,14 @@ def validate_whole_cloud_output(output_dir: Path) -> dict[str, Any]:
     state = json.loads((output_dir / "processing_state.json").read_text(encoding="utf-8"))
     if state.get("algorithm_version") != report.get("algorithm_version"):
         raise ValueError("processing_state.json 与报告算法版本不一致")
-    done_states = [value for value in state.get("tiles", {}).values() if value.get("status") == "done"]
+    tiles_state = state.get("tiles")
+    if not isinstance(tiles_state, dict):
+        raise ValueError("processing_state.json 的 tiles 必须是对象")
+    done_states = [value for value in tiles_state.values() if value.get("status") == "done"]
     if len(done_states) != int(tiling.get("processed_tiles", -1)):
         raise ValueError("processing_state.json 与 processed_tiles 不一致")
 
-    overlay_value = report.get("detachment", {}).get("overlay")
+    overlay_value = detachment.get("overlay")
     overlay_path = output_dir / Path(str(overlay_value)).name if overlay_value else None
     merged_points = int(counts.get("merged_overlay_points", 0))
     if merged_points and (overlay_path is None or not overlay_path.is_file()):
