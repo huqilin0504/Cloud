@@ -78,6 +78,35 @@ class WholeCloudTilingTests(unittest.TestCase):
             self.assertFalse(tile_dir.exists())
             self.assertTrue((quarantined / stale_tile.name).is_file())
 
+    def test_empty_las_tile_is_treated_as_invalid(self):
+        with tempfile.TemporaryDirectory(prefix="whole-cloud-empty-") as directory:
+            tile = Path(directory) / "tile_0_0.laz"
+            header = laspy.LasHeader(point_format=3, version="1.2")
+            laspy.LasData(header).write(tile)
+            self.assertEqual(_invalid_source_tiles([tile]), [tile])
+
+    def test_old_processing_state_without_plan_remains_readable(self):
+        plan = {
+            "tile_size_m": 25.0,
+            "overlap_m": 1.0,
+            "origin_x": 0.0,
+            "origin_y": 0.0,
+            "max_ix": 1,
+            "max_iy": 1,
+            "nominal_columns": 2,
+            "nominal_rows": 2,
+        }
+        with tempfile.TemporaryDirectory(prefix="whole-cloud-old-state-") as directory:
+            path = Path(directory) / "processing_state.json"
+            path.write_text(json.dumps({"algorithm_version": "test-v1", "tiles": {}}), encoding="utf-8")
+            state = _load_processing_state(
+                path,
+                plan=plan,
+                algorithm_version="test-v1",
+                resume=True,
+            )
+            self.assertEqual(state["tiles"], {})
+
     def test_progress_line_reports_fraction_and_detail(self):
         line = _format_progress("节理候选识别", 5, 10, "完成 tile_0_0")
         self.assertIn("5/10", line)
@@ -248,6 +277,41 @@ class WholeCloudTilingTests(unittest.TestCase):
         _, groups, _ = _merge_plane_rows(rows, {"overlap_m": 0.05}, config)
         self.assertEqual(sorted(len(group) for group in groups.values()), [1, 2])
 
+    def test_cross_tile_merge_uses_bbox_fallback_when_footprint_is_missing(self):
+        def row(tile_id, xmin, xmax):
+            return {
+                "tile_id": tile_id,
+                "plane_id": f"{tile_id}:P1",
+                "global_plane_id": f"{tile_id}:P1",
+                "core_red_points": 100,
+                "nx": 0.0,
+                "ny": 0.0,
+                "nz": 1.0,
+                "plane_d": -2205.0,
+                "center_x": (xmin + xmax) / 2.0,
+                "center_y": 3132565.0,
+                "center_z": 2205.0,
+                "bbox_min_x": xmin,
+                "bbox_min_y": 3132560.0,
+                "bbox_min_z": 2205.0,
+                "bbox_max_x": xmax,
+                "bbox_max_y": 3132570.0,
+                "bbox_max_z": 2205.0,
+                "rms_m": 0.001,
+            }
+
+        config = load_config(None)
+        config["whole_cloud"].update(
+            {"merge_xy_gap_m": 0.30, "merge_plane_offset_m": 0.08}
+        )
+        merged, groups, _ = _merge_plane_rows(
+            [row("0_0", 525000.0, 525005.0), row("1_0", 525005.2, 525010.0)],
+            {"overlap_m": 0.05},
+            config,
+        )
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(merged[0]["global_plane_id"], merged[1]["global_plane_id"])
+
     def test_final_overlay_keeps_only_globally_selected_plane_indices(self):
         source = {
             "scale": [0.01, 0.01, 0.01],
@@ -357,6 +421,87 @@ class WholeCloudTilingTests(unittest.TestCase):
             self.assertEqual(report["tiling"]["parallel_mode"], "thread_pool")
             self.assertEqual(report["tiling"]["workers"], 2)
             self.assertEqual(report["tiling"]["processed_tiles"], 2)
+
+    def test_failed_tile_is_retried_and_marked_done_on_resume(self):
+        source = {
+            "path": "",
+            "total_points": 10,
+            "point_format": 2,
+            "scale": [0.01, 0.01, 0.01],
+            "offset": [0.0, 0.0, 0.0],
+            "bounds": {"min": [0.0, 0.0, 0.0], "max": [24.0, 24.0, 1.0]},
+            "crs": None,
+            "is_copc": False,
+            "source_format": "LAS/LAZ",
+            "dimensions": ["x", "y", "z"],
+        }
+        with tempfile.TemporaryDirectory(prefix="whole-cloud-retry-") as directory:
+            root = Path(directory)
+            input_path = root / "source.las"
+            input_path.write_bytes(b"mock input")
+            source["path"] = str(input_path.resolve())
+            output_dir = root / "output"
+            source_tile_dir = output_dir / "source_tiles"
+            source_tile_dir.mkdir(parents=True)
+            tile_path = source_tile_dir / "tile_0_0.laz"
+            tile_path.write_bytes(b"mock tile")
+            plan = _grid_plan(source, 25.0, 1.0)
+            (output_dir / "split_state.json").write_text(
+                json.dumps({"input": source, "plan": plan, "tiles": [tile_path.name]}),
+                encoding="utf-8",
+            )
+            attempts = {"count": 0}
+
+            def flaky_process_tile(tile_path, **kwargs):
+                attempts["count"] += 1
+                if attempts["count"] == 1:
+                    raise RuntimeError("simulated tile failure")
+                ix, iy = _parse_tile_name(tile_path)
+                return TileResult(
+                    {
+                        "algorithm_version": "0.7.0-multiscale-stability-hierarchical-merge",
+                        "tile_id": f"{ix}_{iy}",
+                        "status": "done",
+                        "counts": {
+                            "candidate_red_points": 0,
+                            "core_points": 0,
+                            "input_points": 0,
+                        },
+                        "density": {"local_surface_density": {"status": "not_assessed"}},
+                    },
+                    [],
+                    [],
+                )
+
+            patches = (
+                patch("rock_discontinuity.processing.whole_cloud._source_info", return_value=source),
+                patch("rock_discontinuity.processing.whole_cloud._process_tile", side_effect=flaky_process_tile),
+                patch("rock_discontinuity.processing.whole_cloud._merge_overlays", return_value=0),
+                patch("rock_discontinuity.processing.whole_cloud._source_crs", return_value=None),
+            )
+            with patches[0], patches[1], patches[2], patches[3]:
+                first = run_whole_cloud(
+                    input_path,
+                    output_dir,
+                    load_config(None),
+                    resume=True,
+                    keep_source_tiles=True,
+                    workers=1,
+                )
+                second = run_whole_cloud(
+                    input_path,
+                    output_dir,
+                    load_config(None),
+                    resume=True,
+                    keep_source_tiles=True,
+                    workers=1,
+                )
+
+            self.assertEqual(first["tiling"]["failed_tiles"], 1)
+            self.assertEqual(second["tiling"]["failed_tiles"], 0)
+            self.assertEqual(attempts["count"], 2)
+            state = json.loads((output_dir / "processing_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["tiles"]["0_0"]["status"], "done")
 
 
 if __name__ == "__main__":

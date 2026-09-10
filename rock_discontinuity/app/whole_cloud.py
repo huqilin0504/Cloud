@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workers",
         type=int,
-        help="节理候选识别并行线程数；默认读取 whole_cloud.workers（默认 2）",
+        help="节理候选识别并行线程数；默认读取 whole_cloud.workers",
     )
     parser.add_argument("--plan-only", action="store_true", help="只读取 LAS header 并打印分块计划")
     parser.add_argument("--pdal", default="pdal", help="PDAL 可执行文件")

@@ -10,6 +10,52 @@ from rock_discontinuity.processing.merge import merge_plane_instances, planes_ca
 
 
 class PlaneMergeTests(unittest.TestCase):
+    def test_reversed_normals_parallel_offset_threshold_and_missing_footprint(self):
+        # Use projected-coordinate-sized values from the real site so that the
+        # fallback bbox path is checked without relying on an alpha footprint.
+        common = {
+            "d": -525005.0,
+            "centroid": np.array([525005.0, 3132565.0, 2205.0]),
+            "bbox_min": np.array([525005.0, 3132560.0, 2200.0]),
+            "bbox_max": np.array([525005.0, 3132570.0, 2210.0]),
+            "rms": 0.001,
+        }
+        left = PlaneInstance(normal=np.array([1.0, 0.0, 0.0]), **common)
+        within = PlaneInstance(
+            normal=np.array([-1.0, 0.0, 0.0]),
+            d=525005.1,
+            centroid=np.array([525005.1, 3132565.0, 2205.0]),
+            bbox_min=np.array([525005.1, 3132560.0, 2200.0]),
+            bbox_max=np.array([525005.1, 3132570.0, 2210.0]),
+            rms=0.001,
+        )
+        beyond = PlaneInstance(
+            normal=np.array([-1.0, 0.0, 0.0]),
+            d=525005.11,
+            centroid=np.array([525005.11, 3132565.0, 2205.0]),
+            bbox_min=np.array([525005.11, 3132560.0, 2200.0]),
+            bbox_max=np.array([525005.11, 3132570.0, 2210.0]),
+            rms=0.001,
+        )
+        self.assertTrue(
+            planes_can_merge(
+                left,
+                within,
+                normal_angle_deg=1.0,
+                plane_offset_m=0.1,
+                spatial_gap_m=0.1000001,
+            )
+        )
+        self.assertFalse(
+            planes_can_merge(
+                left,
+                beyond,
+                normal_angle_deg=1.0,
+                plane_offset_m=0.1,
+                spatial_gap_m=0.1,
+            )
+        )
+
     def test_projected_footprints_prevent_bbox_false_merge(self):
         common = {
             "normal": np.array([0.0, 0.0, 1.0]),
