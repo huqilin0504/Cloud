@@ -58,7 +58,7 @@ python3 main.py --help
 python3 -m rock_discontinuity --help
 ```
 
-当前结果：本轮识别测试 `45 passed`；两个转换回归脚本均输出 `PASS`；编译和四个帮助入口退出码
+当前结果：本轮识别测试 `46 passed`；两个转换回归脚本均输出 `PASS`；编译和四个帮助入口退出码
 均为 0。架构契约测试同时解析绝对和相对导入，确认 `core` 不依赖 `processing/io/app`，
 `io` 不依赖 `processing/app`。
 
