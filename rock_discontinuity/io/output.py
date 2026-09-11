@@ -3,6 +3,7 @@ from __future__ import annotations
 import colorsys
 import csv
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -65,7 +66,7 @@ DETACHMENT_FIELDS = [
 ]
 
 
-def _write_csv(path: Path, rows: Iterable[dict[str, Any]], fields: list[str]) -> None:
+def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fields: list[str]) -> None:
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
@@ -126,7 +127,10 @@ def write_segmented_ply(
         mask = labels == label
         color = _plane_color(label)
         output["plane_index"][mask] = label
-        output["set_index"][mask] = set_index.get(planes[label].set_id, -1)
+        plane_set_id = planes[label].set_id
+        output["set_index"][mask] = (
+            set_index.get(plane_set_id, -1) if plane_set_id is not None else -1
+        )
         output["red"][mask], output["green"][mask], output["blue"][mask] = color
 
     header = (
@@ -192,7 +196,10 @@ def write_detachment_ply(
             continue
         mask = labels == label
         output["plane_index"][mask] = label
-        output["set_index"][mask] = set_index.get(planes[label].set_id, -1)
+        plane_set_id = planes[label].set_id
+        output["set_index"][mask] = (
+            set_index.get(plane_set_id, -1) if plane_set_id is not None else -1
+        )
         if selected_planes[label]:
             output["red"][mask] = 230
             output["green"][mask] = 35
@@ -274,7 +281,8 @@ def write_outputs(
         planes,
         detachment_labels,
     )
-    np.savez_compressed(output_dir / "features.npz", xyz=filtered_points, **features)
+    feature_payload: dict[str, Any] = {"xyz": filtered_points, **features}
+    np.savez_compressed(output_dir / "features.npz", **feature_payload)
     (output_dir / "plane_boundaries.geojson").write_text(
         json.dumps(
             prepared_boundary_feature_collection,
