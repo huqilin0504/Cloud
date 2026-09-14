@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import csv
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -145,7 +146,11 @@ def _json_default(value: Any):
     raise TypeError(f"无法序列化类型：{type(value)!r}")
 
 
-def write_rows(path: Path, rows: list[dict[str, Any]], fields: Sequence[str]) -> None:
+def write_rows(
+    path: Path,
+    rows: Sequence[Mapping[str, Any]],
+    fields: Sequence[str],
+) -> None:
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(fields), extrasaction="ignore")
         writer.writeheader()

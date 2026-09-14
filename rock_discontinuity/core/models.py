@@ -414,7 +414,25 @@ def tile_plane_record_from_json(value: Mapping[str, Any]) -> TilePlaneRecord:
 
     if not isinstance(value, Mapping):
         raise TypeError("瓦片平面记录必须是 JSON 对象")
-    return cast(TilePlaneRecord, dict(value))
+    row = dict(value)
+    # A JSON report stores footprint vertices as nested Python lists.  With
+    # thousands of tiles, retaining those lists across global aggregation can
+    # use several times the on-disk size and trigger the OS OOM killer.  Keep
+    # the same geometry, but compact each ring immediately into a float64
+    # NumPy array.  float32 is intentionally avoided because ENU coordinates
+    # around 5e5 m would lose centimetre-level precision.
+    footprint = row.get("_footprint_xyz")
+    if isinstance(footprint, list):
+        compact_rings: list[np.ndarray] = []
+        for ring in footprint:
+            try:
+                array = np.asarray(ring, dtype=np.float64)
+            except (TypeError, ValueError):
+                continue
+            if array.ndim == 2 and array.shape[1] == 3 and len(array) >= 3:
+                compact_rings.append(np.ascontiguousarray(array))
+        row["_footprint_xyz"] = cast(Any, compact_rings)
+    return cast(TilePlaneRecord, row)
 
 
 def spacing_record_from_json(value: Mapping[str, Any]) -> SpacingRecord:
