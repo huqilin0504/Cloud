@@ -1,0 +1,42 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Build products and vendored/downloaded dependencies
+build/
+dist/
+osgb_pipeline/build/
+osgb_pipeline/deps/
+osgb_pipeline/.venv/
+
+# Generated analysis results and large point-cloud artifacts
+outputs/
+*.las
+*.laz
+*.ply
+*.pcd
+*.obj
+*.xyz
+*.tif
+*.tiff
+*.mp4
+
+# Local data and machine-specific editor settings
+科研 现场资料/
+.vscode/
+.idea/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+.coverage
+coverage.xml
+

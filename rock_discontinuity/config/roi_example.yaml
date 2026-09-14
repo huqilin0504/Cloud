@@ -1,0 +1,26 @@
+# 从仓库根目录运行的 600 点/m² 阶段 1 示例配置。
+# 该 ROI 是为验证工程链路临时选取的 40 m × 40 m 范围；它不是外部真值样本。
+input:
+  # 目录名为历史遗留名称；对应 stats.json 的实际密度为 600 points/m²。
+  path: outputs/root_full_xyz_10/cloud.las
+  roi:
+    min_x: 524898
+    max_x: 524938
+    min_y: 3132085
+    max_y: 3132125
+  chunk_size: 500000
+  max_points_without_roi: 2000000
+
+coordinate:
+  x_axis: east
+  y_axis: north
+  z_axis: up
+  unit: meter
+
+output:
+  directory: outputs/discontinuity_roi_600
+
+validation:
+  stage: roi_functional_only
+  roi_confirmation: phase1_not_required
+  field_calibration: not_applicable
