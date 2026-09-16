@@ -9,7 +9,7 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 
 from ..core.fitting import fit_plane_instance
-from ..core.geometry import normal_angle_matrix
+from ..core.geometry import sparse_axial_dbscan_labels, split_axial_by_deviation
 from .audit import audit_points
 from .density import assess_density, discontinuity_density_metrics, estimate_roi_density
 from .detachment import classify_candidate_joint_planes
@@ -31,22 +31,12 @@ from .output_records import (
 
 def _split_by_angular_deviation(
     indices: np.ndarray,
-    angle_matrix: np.ndarray,
+    normals: np.ndarray,
     max_deviation_rad: float,
 ) -> list[np.ndarray]:
-    """Split DBSCAN chains so one set cannot exceed its angular spread gate."""
+    """Split DBSCAN chains without creating a dense angle matrix."""
 
-    remaining = set(int(index) for index in indices)
-    groups: list[np.ndarray] = []
-    while remaining:
-        candidates = np.asarray(sorted(remaining), dtype=np.int64)
-        medoid = int(candidates[np.argmin(angle_matrix[np.ix_(candidates, candidates)].sum(axis=1))])
-        selected = candidates[angle_matrix[medoid, candidates] <= max_deviation_rad]
-        if not len(selected):
-            selected = np.asarray([medoid], dtype=np.int64)
-        groups.append(selected)
-        remaining.difference_update(int(index) for index in selected)
-    return groups
+    return split_axial_by_deviation(indices, normals, max_deviation_rad)
 
 
 def _cluster_plane_orientations(planes: list[PlaneInstance], config: dict[str, Any]) -> list[list[PlaneInstance]]:
@@ -54,14 +44,13 @@ def _cluster_plane_orientations(planes: list[PlaneInstance], config: dict[str, A
         return []
     normals = np.asarray([plane.normal for plane in planes], dtype=np.float64)
     normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-15)
-    angle_matrix = np.deg2rad(normal_angle_matrix(normals))
     angular_eps = np.deg2rad(float(config.get("angular_eps_deg", 10.0)))
     max_deviation = np.deg2rad(float(config.get("max_set_deviation_deg", 12.0)))
-    labels = DBSCAN(eps=angular_eps, min_samples=1, metric="precomputed").fit_predict(angle_matrix)
+    labels = sparse_axial_dbscan_labels(normals, angular_eps)
     groups: list[list[PlaneInstance]] = []
-    for label in sorted(set(int(value) for value in labels)):
+    for label in sorted(int(value) for value in np.unique(labels)):
         indices = np.flatnonzero(labels == label).astype(np.int64)
-        for split_indices in _split_by_angular_deviation(indices, angle_matrix, max_deviation):
+        for split_indices in _split_by_angular_deviation(indices, normals, max_deviation):
             groups.append([planes[int(index)] for index in split_indices])
     return groups
 

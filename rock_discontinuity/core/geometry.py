@@ -41,6 +41,237 @@ def normal_angle_matrix(normals: np.ndarray) -> np.ndarray:
     return np.degrees(np.arccos(np.clip(np.abs(unit @ unit.T), 0.0, 1.0)))
 
 
+def sparse_axial_dbscan_labels(normals: np.ndarray, eps_rad: float) -> np.ndarray:
+    """Cluster axial normals without materialising an ``N x N`` matrix.
+
+    With ``min_samples=1``, the precomputed DBSCAN used by the original
+    implementation is exactly the connected-component problem on the graph
+    whose edges satisfy ``acos(abs(dot(a, b))) <= eps_rad``. Each normal is
+    represented by both signs, binned in 3-D chord space, and neighbouring
+    bins are checked with a local KDTree. The bin diagonal is smaller than
+    the edge radius, so all points in one occupied bin are one connected
+    component and only one cross-bin edge is required.
+
+    The returned labels preserve the connected-component semantics while using
+    O(N) point storage and a small number of bin-level queries. The dense
+    ``normal_angle_matrix`` remains available for small diagnostic batches.
+    """
+
+    values = np.asarray(normals, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != 3:
+        raise ValueError("normals 必须是形状为 (n, 3) 的数组")
+    count = len(values)
+    if count == 0:
+        return np.empty(0, dtype=np.int32)
+    norms = np.linalg.norm(values, axis=1, keepdims=True)
+    if np.any(~np.isfinite(norms)) or np.any(norms <= 1e-15):
+        raise ValueError("normals 不能包含零向量或非有限值")
+    eps = float(eps_rad)
+    if not np.isfinite(eps) or eps < 0.0 or eps > (np.pi / 2.0 + 1e-12):
+        raise ValueError("eps_rad 必须位于 [0, pi/2]")
+    unit = values / norms
+    if eps <= 1e-12:
+        # Use the six unique entries of nn^T as an axial-sign-invariant key.
+        # Rounding only handles floating-point noise in this zero-radius limit.
+        axial_key = np.column_stack(
+            (
+                unit[:, 0] ** 2,
+                unit[:, 1] ** 2,
+                unit[:, 2] ** 2,
+                unit[:, 0] * unit[:, 1],
+                unit[:, 0] * unit[:, 2],
+                unit[:, 1] * unit[:, 2],
+            )
+        )
+        _, labels = np.unique(np.round(axial_key, decimals=12), axis=0, return_inverse=True)
+        return labels.astype(np.int32, copy=False)
+
+    # For unit vectors, min(||a-b||, ||a+b||) = 2 sin(theta_axial / 2).
+    radius = float(2.0 * np.sin(eps / 2.0))
+    query_radius = float(np.nextafter(radius, np.inf))
+    cell_size = radius / np.sqrt(3.0) * (1.0 - 1e-9)
+    oriented = np.concatenate((unit, -unit), axis=0)
+    identifiers = np.tile(np.arange(count, dtype=np.int64), 2)
+    cell_keys = np.floor(oriented / cell_size).astype(np.int64)
+    order = np.lexsort((cell_keys[:, 2], cell_keys[:, 1], cell_keys[:, 0]))
+    sorted_keys = cell_keys[order]
+    sorted_points = oriented[order]
+    sorted_ids = identifiers[order]
+    del cell_keys, oriented, identifiers, order
+
+    if len(sorted_keys) == 1:
+        starts = np.array([0], dtype=np.int64)
+    else:
+        boundaries = np.flatnonzero(
+            np.any(sorted_keys[1:] != sorted_keys[:-1], axis=1)
+        ).astype(np.int64) + 1
+        starts = np.concatenate((np.array([0], dtype=np.int64), boundaries))
+    ends = np.concatenate((starts[1:], np.array([len(sorted_keys)], dtype=np.int64)))
+    cell_keys_list = [
+        tuple(int(value) for value in sorted_keys[start]) for start in starts
+    ]
+    cell_lookup = {key: index for index, key in enumerate(cell_keys_list)}
+
+    parent = np.arange(count, dtype=np.int64)
+    component_size = np.ones(count, dtype=np.int32)
+
+    def find(index: int) -> int:
+        root = int(index)
+        while int(parent[root]) != root:
+            root = int(parent[root])
+        current = int(index)
+        while int(parent[current]) != current:
+            next_index = int(parent[current])
+            parent[current] = root
+            current = next_index
+        return root
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        if int(component_size[left_root]) < int(component_size[right_root]):
+            left_root, right_root = right_root, left_root
+        parent[right_root] = left_root
+        component_size[left_root] += component_size[right_root]
+
+    cell_representatives = np.empty(len(starts), dtype=np.int64)
+    for cell_index, (start, end) in enumerate(zip(starts, ends)):
+        members = sorted_ids[start:end]
+        representative = int(members[0])
+        cell_representatives[cell_index] = representative
+        for member in members[1:]:
+            union(representative, int(member))
+
+    trees: dict[int, KDTree] = {}
+
+    def get_tree(cell_index: int) -> KDTree:
+        tree = trees.get(cell_index)
+        if tree is None:
+            start = int(starts[cell_index])
+            end = int(ends[cell_index])
+            tree = KDTree(sorted_points[start:end])
+            trees[cell_index] = tree
+        return tree
+
+    def query_tree(tree: KDTree, points: np.ndarray):
+        try:
+            return tree.query(
+                points,
+                k=1,
+                distance_upper_bound=query_radius,
+                workers=1,
+            )
+        except TypeError:
+            return tree.query(points, k=1, distance_upper_bound=query_radius)
+
+    def cross_cell_edge(left: int, right: int) -> tuple[int, int] | None:
+        left_start, left_end = int(starts[left]), int(ends[left])
+        right_start, right_end = int(starts[right]), int(ends[right])
+        left_points = sorted_points[left_start:left_end]
+        right_points = sorted_points[right_start:right_end]
+        if len(left_points) <= len(right_points):
+            distances, neighbours = query_tree(get_tree(left), right_points)
+            finite = np.flatnonzero(np.isfinite(np.asarray(distances)))
+            if not len(finite):
+                return None
+            query_index = int(finite[0])
+            neighbour_index = int(np.asarray(neighbours)[query_index])
+            return (
+                int(sorted_ids[left_start + neighbour_index]),
+                int(sorted_ids[right_start + query_index]),
+            )
+        distances, neighbours = query_tree(get_tree(right), left_points)
+        finite = np.flatnonzero(np.isfinite(np.asarray(distances)))
+        if not len(finite):
+            return None
+        query_index = int(finite[0])
+        neighbour_index = int(np.asarray(neighbours)[query_index])
+        return (
+            int(sorted_ids[left_start + query_index]),
+            int(sorted_ids[right_start + neighbour_index]),
+        )
+
+    # The extra cell is necessary because cells with index distance two can
+    # still have points within the radius. The box-distance gate removes the
+    # remaining offsets before a KDTree query.
+    neighbour_delta = int(np.ceil(query_radius / cell_size)) + 1
+    radius_squared = query_radius * query_radius
+    for cell_index, key in enumerate(cell_keys_list):
+        key_array = np.asarray(key, dtype=np.int64)
+        for dx in range(-neighbour_delta, neighbour_delta + 1):
+            for dy in range(-neighbour_delta, neighbour_delta + 1):
+                for dz in range(-neighbour_delta, neighbour_delta + 1):
+                    other = cell_lookup.get((key[0] + dx, key[1] + dy, key[2] + dz))
+                    if other is None or other <= cell_index:
+                        continue
+                    if find(int(cell_representatives[cell_index])) == find(
+                        int(cell_representatives[other])
+                    ):
+                        continue
+                    other_array = np.asarray(cell_keys_list[other], dtype=np.int64)
+                    gap_cells = np.maximum(np.abs(key_array - other_array) - 1, 0)
+                    if float(np.dot(gap_cells, gap_cells)) * cell_size**2 > radius_squared:
+                        continue
+                    edge = cross_cell_edge(cell_index, other)
+                    if edge is not None:
+                        union(*edge)
+
+    roots = np.empty(count, dtype=np.int64)
+    for index in range(count):
+        roots[index] = find(index)
+    _, labels = np.unique(roots, return_inverse=True)
+    return labels.astype(np.int32, copy=False)
+
+
+def split_axial_by_deviation(
+    indices: np.ndarray,
+    normals: np.ndarray,
+    max_deviation_rad: float,
+) -> list[np.ndarray]:
+    """Split an axial-orientation component with O(N) memory.
+
+    The former implementation selected an exact medoid from an angle matrix.
+    Here the principal eigenvector of the normal outer-product sum is the
+    axial mean direction; selecting points around it preserves the same
+    maximum-deviation gate without an O(N²) allocation.
+    """
+
+    selected_indices = np.asarray(indices, dtype=np.int64)
+    values = np.asarray(normals, dtype=np.float64)
+    if len(selected_indices) == 0:
+        return []
+    if values.ndim != 2 or values.shape[1] != 3:
+        raise ValueError("normals 必须是形状为 (n, 3) 的数组")
+    max_deviation = float(max_deviation_rad)
+    if not np.isfinite(max_deviation) or max_deviation < 0.0:
+        raise ValueError("max_deviation_rad 必须是非负有限值")
+    max_deviation = min(max_deviation, np.pi / 2.0)
+    norms = np.linalg.norm(values, axis=1, keepdims=True)
+    if np.any(~np.isfinite(norms)) or np.any(norms <= 1e-15):
+        raise ValueError("normals 不能包含零向量或非有限值")
+    unit = values / norms
+    remaining = np.ones(len(selected_indices), dtype=bool)
+    cosine_limit = float(np.cos(max_deviation))
+    groups: list[np.ndarray] = []
+    while np.any(remaining):
+        positions = np.flatnonzero(remaining)
+        candidate_indices = selected_indices[positions]
+        candidate_normals = unit[candidate_indices]
+        scatter = candidate_normals.T @ candidate_normals
+        _, eigenvectors = np.linalg.eigh(scatter)
+        center = eigenvectors[:, -1]
+        center /= max(float(np.linalg.norm(center)), 1e-15)
+        cosine = np.abs(candidate_normals @ center)
+        picked = positions[cosine >= cosine_limit - 1e-12]
+        if not len(picked):
+            picked = positions[:1]
+        groups.append(selected_indices[picked])
+        remaining[picked] = False
+    return groups
+
+
 def align_plane_equation(
     normal_a: np.ndarray,
     d_a: float,

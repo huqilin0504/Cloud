@@ -6,10 +6,14 @@ from collections import defaultdict
 from typing import Any, cast
 
 import numpy as np
-from sklearn.cluster import DBSCAN
 
 from ..core.fitting import confidence_score, dip_and_dip_direction, quality_grade
-from ..core.geometry import footprint_geometry_on_plane, normal_angle_deg, normal_angle_matrix
+from ..core.geometry import (
+    footprint_geometry_on_plane,
+    normal_angle_deg,
+    sparse_axial_dbscan_labels,
+    split_axial_by_deviation,
+)
 from ..core.models import (
     GlobalAggregationResult,
     GlobalJointSetRecord,
@@ -131,29 +135,22 @@ def global_orientation_sets(
     if not groups:
         return {}
     group_ids = sorted(groups)
-    normals: list[np.ndarray] = []
-    for group_id in group_ids:
+    normal_array = np.empty((len(group_ids), 3), dtype=np.float64)
+    for index, group_id in enumerate(group_ids):
         members = groups[group_id]
         representative = max(members, key=lambda row: row_float(row, "core_red_points") or 0.0)
         normal = row_normal(representative)
-        normals.append(normal if normal is not None else np.array([0.0, 0.0, 1.0]))
-    normal_array = np.asarray(normals, dtype=np.float64)
-    angles = np.deg2rad(normal_angle_matrix(normal_array))
+        normal_array[index] = normal if normal is not None else np.array([0.0, 0.0, 1.0])
     joint_config = config.get("joint_sets", {})
     eps = np.deg2rad(float(joint_config.get("angular_eps_deg", 10.0)))
-    labels = DBSCAN(eps=eps, min_samples=1, metric="precomputed").fit_predict(angles)
+    labels = sparse_axial_dbscan_labels(normal_array, eps)
     max_deviation = np.deg2rad(float(joint_config.get("max_set_deviation_deg", 12.0)))
     index_groups: list[list[int]] = []
-    for label in sorted(set(int(value) for value in labels)):
-        remaining = set(int(index) for index in np.flatnonzero(labels == label))
-        while remaining:
-            candidates = np.asarray(sorted(remaining), dtype=np.int64)
-            medoid = int(candidates[np.argmin(angles[np.ix_(candidates, candidates)].sum(axis=1))])
-            selected = candidates[angles[medoid, candidates] <= max_deviation]
-            if not len(selected):
-                selected = np.asarray([medoid], dtype=np.int64)
-            index_groups.append([int(index) for index in selected])
-            remaining.difference_update(int(index) for index in selected)
+    for label in sorted(int(value) for value in np.unique(labels)):
+        indices = np.flatnonzero(labels == label).astype(np.int64)
+        index_groups.extend(
+            [group.tolist() for group in split_axial_by_deviation(indices, normal_array, max_deviation)]
+        )
     index_groups.sort(
         key=lambda indices: -sum(
             row_float(
