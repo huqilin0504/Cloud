@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any, cast
 
 import numpy as np
@@ -33,15 +34,32 @@ from .aggregation import (
 )
 
 
+ProgressCallback = Callable[[str, int, int, str], None]
+
+
+def _notify(
+    progress: ProgressCallback | None,
+    stage: str,
+    current: int,
+    total: int,
+    detail: str = "",
+) -> None:
+    if progress is not None:
+        progress(stage, current, total, detail)
+
+
 def merge_plane_rows(
     rows: list[TilePlaneRecord],
     plan: dict[str, Any],
     config: dict[str, Any],
+    *,
+    progress: ProgressCallback | None = None,
 ) -> tuple[list[TilePlaneRecord], dict[str, list[TilePlaneRecord]], dict[str, str]]:
     """Merge plane instances touching neighbouring tile boundaries."""
 
     rows = [dict(row) for row in rows]
     if not rows:
+        _notify(progress, "跨瓦片合并", 1, 1, "无平面记录")
         return rows, {}, {}
     whole_config = config.get("whole_cloud", {})
     merge_enabled = bool(whole_config.get("merge_enabled", True))
@@ -90,9 +108,12 @@ def merge_plane_rows(
         if tile_indices is not None:
             by_tile[tile_indices].append(index)
 
+    tile_items = list(by_tile.items())
+    tile_total = max(1, len(tile_items))
+    _notify(progress, "跨瓦片合并", 0, tile_total, f"候选瓦片 {len(tile_items)} 个")
     if merge_enabled:
         neighbour_offsets = ((1, -1), (1, 0), (1, 1), (0, 1))
-        for (ix, iy), left_indices in by_tile.items():
+        for tile_index, ((ix, iy), left_indices) in enumerate(tile_items, start=1):
             for dx, dy in neighbour_offsets:
                 right_indices = by_tile.get((ix + dx, iy + dy), [])
                 for left in left_indices:
@@ -106,6 +127,11 @@ def merge_plane_rows(
                             max_merged_rms_m=max_merged_rms_m,
                         ) and components_are_compatible(left, right):
                             union(left, right)
+            _notify(progress, "跨瓦片合并", tile_index, tile_total, f"完成 {ix}_{iy}")
+        if not tile_items:
+            _notify(progress, "跨瓦片合并", tile_total, tile_total, "无有效瓦片索引")
+    else:
+        _notify(progress, "跨瓦片合并", tile_total, tile_total, "配置已关闭")
 
     root_members: dict[int, list[int]] = defaultdict(list)
     for index in range(len(rows)):
@@ -113,6 +139,8 @@ def merge_plane_rows(
     ordered_members = sorted(root_members.values(), key=lambda members: min(members))
     groups: dict[str, list[TilePlaneRecord]] = {}
     old_to_global: dict[str, str] = {}
+    group_total = max(1, len(ordered_members))
+    _notify(progress, "建立全局平面组", 0, group_total, f"形成 {len(ordered_members)} 组")
     for group_index, members in enumerate(ordered_members, start=1):
         global_id = f"GJ-{group_index:05d}"
         group_rows = [rows[index] for index in members]
@@ -125,15 +153,21 @@ def merge_plane_rows(
             row["global_instance_count"] = len(group_rows)
             row["global_tile_count"] = tile_count
             row.setdefault("global_set_id", None)
+        _notify(progress, "建立全局平面组", group_index, group_total, f"完成 {global_id}")
     return rows, groups, old_to_global
 
 
 def global_orientation_sets(
     groups: dict[str, list[TilePlaneRecord]],
     config: dict[str, Any],
+    *,
+    progress: ProgressCallback | None = None,
+    stage: str = "全局方向聚类",
 ) -> dict[str, str]:
     if not groups:
+        _notify(progress, stage, 1, 1, "无平面组")
         return {}
+    _notify(progress, stage, 0, 3, f"输入 {len(groups)} 个平面组")
     group_ids = sorted(groups)
     normal_array = np.empty((len(group_ids), 3), dtype=np.float64)
     for index, group_id in enumerate(group_ids):
@@ -141,9 +175,11 @@ def global_orientation_sets(
         representative = max(members, key=lambda row: row_float(row, "core_red_points") or 0.0)
         normal = row_normal(representative)
         normal_array[index] = normal if normal is not None else np.array([0.0, 0.0, 1.0])
+    _notify(progress, stage, 1, 3, "代表法向量完成")
     joint_config = config.get("joint_sets", {})
     eps = np.deg2rad(float(joint_config.get("angular_eps_deg", 10.0)))
     labels = sparse_axial_dbscan_labels(normal_array, eps)
+    _notify(progress, stage, 2, 3, f"初始方向簇 {len(np.unique(labels))} 个")
     max_deviation = np.deg2rad(float(joint_config.get("max_set_deviation_deg", 12.0)))
     index_groups: list[list[int]] = []
     for label in sorted(int(value) for value in np.unique(labels)):
@@ -166,6 +202,7 @@ def global_orientation_sets(
         set_id = f"J{set_index}"
         for index in indices:
             result[group_ids[index]] = set_id
+    _notify(progress, stage, 3, 3, f"完成 {len(index_groups)} 个节理组")
     return result
 
 
@@ -173,9 +210,15 @@ def aggregate_global_planes(
     groups: dict[str, list[TilePlaneRecord]],
     global_set_ids: dict[str, str],
     config: dict[str, Any],
+    *,
+    progress: ProgressCallback | None = None,
+    stage: str = "全局平面汇总",
 ) -> list[GlobalPlaneRecord]:
     global_rows: list[GlobalPlaneRecord] = []
-    for global_id in sorted(groups):
+    ordered_groups = sorted(groups)
+    total = max(1, len(ordered_groups))
+    _notify(progress, stage, 0, total, f"输入 {len(ordered_groups)} 个平面组")
+    for group_index, global_id in enumerate(ordered_groups, start=1):
         members = groups[global_id]
         representative = max(members, key=lambda row: row_float(row, "core_red_points") or 0.0)
         weights = np.asarray(
@@ -349,29 +392,38 @@ def aggregate_global_planes(
             }
         )
         global_rows.append(row)
+        _notify(progress, stage, group_index, total, f"完成 {global_id}")
+    if not ordered_groups:
+        _notify(progress, stage, total, total, "无平面组")
     return global_rows
 
 
 def apply_global_candidate_gate(
     global_plane_rows: list[GlobalPlaneRecord],
     config: dict[str, Any],
+    *,
+    progress: ProgressCallback | None = None,
 ) -> tuple[set[str], dict[str, SelectionRecord]]:
     """Apply the existing global candidate gate to aggregated plane rows."""
 
     from .detachment import classify_candidate_joint_planes
 
-    global_plane_objects = [
-        PlaneInstance(
-            plane_id=str(item["global_plane_id"]),
-            area=float(item.get("observed_area_m2") or 0.0),
-            minor_extent=float(item.get("minor_extent_m") or 0.0),
-            boundary_completeness=float(item.get("boundary_completeness") or 0.0),
-            inlier_ratio=float(item.get("inlier_ratio") or 0.0),
-            normal_dispersion=float(item.get("normal_dispersion_deg") or 90.0),
-            confidence=float(item.get("confidence") or 0.0),
+    total = max(1, len(global_plane_rows))
+    _notify(progress, "全局候选筛选", 0, total, f"输入 {len(global_plane_rows)} 个")
+    global_plane_objects: list[PlaneInstance] = []
+    for index, item in enumerate(global_plane_rows, start=1):
+        global_plane_objects.append(
+            PlaneInstance(
+                plane_id=str(item["global_plane_id"]),
+                area=float(item.get("observed_area_m2") or 0.0),
+                minor_extent=float(item.get("minor_extent_m") or 0.0),
+                boundary_completeness=float(item.get("boundary_completeness") or 0.0),
+                inlier_ratio=float(item.get("inlier_ratio") or 0.0),
+                normal_dispersion=float(item.get("normal_dispersion_deg") or 90.0),
+                confidence=float(item.get("confidence") or 0.0),
+            )
         )
-        for item in global_plane_rows
-    ]
+        _notify(progress, "全局候选筛选", index, total, f"检查 {item['global_plane_id']}")
     global_selected, global_selection_rows = classify_candidate_joint_planes(
         global_plane_objects,
         config.get("detachment", {}),
@@ -385,12 +437,15 @@ def apply_global_candidate_gate(
     selection_by_id: dict[str, SelectionRecord] = {
         str(row["plane_id"]): row for row in global_selection_rows
     }
+    _notify(progress, "全局候选筛选", total, total, f"保留 {len(selected_global_ids)} 个")
     return selected_global_ids, selection_by_id
 
 
 def global_spacing_and_sets(
     global_rows: list[GlobalPlaneRecord],
     config: dict[str, Any],
+    *,
+    progress: ProgressCallback | None = None,
 ) -> tuple[list[SpacingRecord], list[GlobalJointSetRecord]]:
     by_set: dict[str, list[GlobalPlaneRecord]] = defaultdict(list)
     for row in global_rows:
@@ -398,7 +453,10 @@ def global_spacing_and_sets(
     spacing_rows: list[SpacingRecord] = []
     joint_rows: list[GlobalJointSetRecord] = []
     min_planes = int(config.get("joint_sets", {}).get("min_planes", 3))
-    for set_id in sorted(by_set):
+    ordered_sets = sorted(by_set)
+    total = max(1, len(ordered_sets))
+    _notify(progress, "间距与节理组统计", 0, total, f"输入 {len(ordered_sets)} 个节理组")
+    for set_index, set_id in enumerate(ordered_sets, start=1):
         members = by_set[set_id]
         normals = []
         weights = []
@@ -512,6 +570,9 @@ def global_spacing_and_sets(
             else None
         )
         joint_rows.append(stats)
+        _notify(progress, "间距与节理组统计", set_index, total, f"完成 {set_id}")
+    if not ordered_sets:
+        _notify(progress, "间距与节理组统计", total, total, "无节理组")
     return spacing_rows, joint_rows
 
 
@@ -519,6 +580,8 @@ def aggregate_global_results(
     all_plane_rows: list[TilePlaneRecord],
     plan: dict[str, Any],
     config: dict[str, Any],
+    *,
+    progress: ProgressCallback | None = None,
 ) -> GlobalAggregationResult:
     """Run the complete global aggregation stage without performing I/O.
 
@@ -532,14 +595,27 @@ def aggregate_global_results(
         all_plane_rows,
         plan,
         config,
+        progress=progress,
     )
-    provisional_set_ids = global_orientation_sets(plane_groups, config)
+    provisional_set_ids = global_orientation_sets(
+        plane_groups,
+        config,
+        progress=progress,
+        stage="全局方向聚类(预筛选)",
+    )
     for row in merged_rows:
         row["global_set_id"] = provisional_set_ids.get(str(row["global_plane_id"]))
-    all_global_rows = aggregate_global_planes(plane_groups, provisional_set_ids, config)
+    all_global_rows = aggregate_global_planes(
+        plane_groups,
+        provisional_set_ids,
+        config,
+        progress=progress,
+        stage="全局平面汇总(预筛选)",
+    )
     selected_global_ids, selection_by_id = apply_global_candidate_gate(
         all_global_rows,
         config,
+        progress=progress,
     )
     for row in merged_rows:
         selection = selection_by_id.get(str(row["global_plane_id"]), {})
@@ -549,9 +625,24 @@ def aggregate_global_results(
     selected_groups = {
         key: value for key, value in plane_groups.items() if key in selected_global_ids
     }
-    global_set_ids = global_orientation_sets(selected_groups, config)
-    global_rows = aggregate_global_planes(selected_groups, global_set_ids, config)
-    spacing_rows, joint_set_rows = global_spacing_and_sets(global_rows, config)
+    global_set_ids = global_orientation_sets(
+        selected_groups,
+        config,
+        progress=progress,
+        stage="全局方向聚类(最终)",
+    )
+    global_rows = aggregate_global_planes(
+        selected_groups,
+        global_set_ids,
+        config,
+        progress=progress,
+        stage="全局平面汇总(最终)",
+    )
+    spacing_rows, joint_set_rows = global_spacing_and_sets(
+        global_rows,
+        config,
+        progress=progress,
+    )
     nearest_spacing = nearest_spacing_by_plane(spacing_rows)
     for row in merged_rows:
         row["nearest_spacing_m"] = nearest_spacing.get(str(row["global_plane_id"]))

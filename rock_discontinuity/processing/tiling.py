@@ -136,13 +136,12 @@ def run_pdal_split(
             process.kill()
             process.wait()
         raise
-    finally:
-        print()
     generated = len(list(tile_dir.glob("tile_*.laz")))
-    print(
-        f"[PDAL切块] 完成：生成 {generated} 个非空 LAZ 瓦片"
-        f"（名义网格最多 {expected_tiles} 个）",
-        flush=True,
+    progress(
+        "PDAL切块",
+        expected_tiles,
+        expected_tiles,
+        f"完成，生成 {generated} 个非空 LAZ 瓦片",
     )
 
 
@@ -195,13 +194,14 @@ def _split_copc_source(
                     tiles.append(path)
                 queried += 1
                 progress("COPC索引切块", queried, expected_tiles, f"非空 {len(tiles)} 个")
-    print()
     if not tiles:
+        progress("COPC索引切块", expected_tiles, expected_tiles, "完成，但没有非空瓦片")
         raise RuntimeError("COPC 空间索引查询没有生成任何非空 LAZ 瓦片")
-    print(
-        f"[COPC索引切块] 完成：生成 {len(tiles)} 个非空 LAZ 瓦片"
-        f"（查询网格 {expected_tiles} 个）",
-        flush=True,
+    progress(
+        "COPC索引切块",
+        expected_tiles,
+        expected_tiles,
+        f"完成，生成 {len(tiles)} 个非空 LAZ 瓦片",
     )
     marker = {
         "input": source,

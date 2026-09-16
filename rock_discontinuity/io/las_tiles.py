@@ -141,17 +141,23 @@ def merge_overlays(
     selected_plane_indices_by_tile: dict[str, set[int]] | None,
     *,
     parse_tile_name: Callable[[Path], tuple[int, int]],
+    progress: Callable[[str, int, int, str], None] | None = None,
 ) -> int:
     """Merge candidate LAZ overlays while applying global plane selection."""
 
     header = make_laz_header(source, source_crs)
     temporary = output_path.with_name(output_path.name + ".part")
     total = 0
+    overlay_total = max(1, len(overlay_paths))
+    if progress is not None:
+        progress("合并候选点云", 0, overlay_total, f"输入 {len(overlay_paths)} 个瓦片")
     with laspy.open(temporary, mode="w", header=header):
         pass
     with laspy.open(temporary, mode="a") as writer:
-        for overlay in overlay_paths:
+        for overlay_index, overlay in enumerate(overlay_paths, start=1):
             if not overlay.is_file():
+                if progress is not None:
+                    progress("合并候选点云", overlay_index, overlay_total, f"跳过 {overlay.name}")
                 continue
             with laspy.open(overlay) as reader:
                 for points in reader.chunk_iterator(500_000):
@@ -164,5 +170,9 @@ def merge_overlays(
                             continue
                     writer.append_points(points)
                     total += len(points)
+            if progress is not None:
+                progress("合并候选点云", overlay_index, overlay_total, f"完成 {overlay.name}，{total} 点")
+    if not overlay_paths and progress is not None:
+        progress("合并候选点云", overlay_total, overlay_total, "无候选瓦片")
     temporary.replace(output_path)
     return total

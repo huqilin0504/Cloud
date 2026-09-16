@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+import time
+from typing import Any, Callable
+
+try:
+    from tqdm import tqdm as _tqdm
+except ImportError:  # pragma: no cover - kept for minimal installations
+    _tqdm = None
 
 from ..config import dump_config
 from ..core.models import (
@@ -68,12 +74,95 @@ def _print_progress(stage: str, current: int, total: int, detail: str = "") -> N
     print(_format_progress(stage, current, total, detail), end="", flush=True)
 
 
+class _ProgressReporter:
+    """Render one standard tqdm bar per processing stage.
+
+    The fallback keeps the pipeline usable before dependencies are installed;
+    normal project installations use tqdm and therefore get a real progress
+    bar in both Bash and PowerShell.
+    """
+
+    def __init__(self, interval_seconds: float = 0.25) -> None:
+        self.interval_seconds = float(interval_seconds)
+        self._last_stage: str | None = None
+        self._last_emit = 0.0
+        self._line_open = False
+        self._bar: Any | None = None
+        self._stage: str | None = None
+        self._completed = False
+
+    def __call__(self, stage: str, current: int, total: int, detail: str = "") -> None:
+        total_value = max(1, int(total))
+        current_value = max(0, min(int(current), total_value))
+        completed = current_value >= total_value
+
+        if _tqdm is not None:
+            if self._bar is None and self._completed and stage == self._stage and completed:
+                return
+            stage_changed = stage != self._stage
+            if self._bar is None or stage_changed:
+                self.close()
+                self._stage = stage
+                self._completed = False
+                self._bar = _tqdm(
+                    total=total_value,
+                    desc=stage,
+                    unit="项",
+                    dynamic_ncols=True,
+                    leave=True,
+                )
+            elif self._bar.total != total_value:
+                self._bar.total = total_value
+            # Assign directly and throttle refreshes.  Updating a tqdm bar
+            # for every plane group would otherwise make terminal I/O visible
+            # in the runtime of the global aggregation stage.
+            self._bar.n = current_value
+            now = time.monotonic()
+            should_refresh = stage_changed or completed or now - self._last_emit >= self.interval_seconds
+            if should_refresh and detail:
+                self._bar.set_postfix_str(detail, refresh=False)
+            if completed:
+                self._bar.close()
+                self._bar = None
+                self._completed = True
+            elif should_refresh:
+                self._bar.refresh()
+                self._last_emit = now
+            return
+
+        now = time.monotonic()
+        stage_changed = stage != self._last_stage
+        if not (stage_changed or completed or now - self._last_emit >= self.interval_seconds):
+            return
+        if stage_changed and self._line_open:
+            print()
+        _print_progress(stage, current_value, total_value, detail)
+        self._last_stage = stage
+        self._last_emit = now
+        if completed:
+            print()
+            self._line_open = False
+        else:
+            self._line_open = True
+
+    def close(self) -> None:
+        if self._bar is not None:
+            self._bar.close()
+            self._bar = None
+            self._completed = False
+        if self._line_open:
+            print()
+            self._line_open = False
+
+
 def _merge_overlays(
     overlay_paths: list[Path],
     output_path: Path,
     source: dict[str, Any],
     source_crs: Any,
     selected_plane_indices_by_tile: dict[str, set[int]] | None = None,
+    *,
+    progress: Callable[[str, int, int, str], None] | None = None,
 ) -> int:
     """Compatibility adapter for callers of the old private helper."""
 
@@ -84,6 +173,7 @@ def _merge_overlays(
         source_crs,
         selected_plane_indices_by_tile,
         parse_tile_name=_parse_tile_name,
+        progress=progress,
     )
 
 
@@ -126,6 +216,7 @@ def run_whole_cloud(
     input_path = input_path.expanduser().resolve()
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    progress = _ProgressReporter()
     tile_size, overlap = tiling_parameters(config, tile_size, overlap)
     source = _source_info(input_path)
     plan = _grid_plan(source, tile_size, overlap)
@@ -141,7 +232,9 @@ def run_whole_cloud(
     if split_state_path.is_file():
         if not resume:
             raise FileExistsError(f"输出已存在；请使用 --resume 继续：{output_dir}")
+        progress("读取分块状态", 0, 1, "校验已有 split_state.json")
         tile_paths = _load_split_state(split_state_path, source, plan)
+        progress("读取分块状态", 1, 1, f"完成，{len(tile_paths)} 个瓦片")
     else:
         if output_dir.iterdir() and resume:
             raise FileNotFoundError("要求恢复，但输出目录没有 split_state.json")
@@ -151,8 +244,9 @@ def run_whole_cloud(
             plan,
             source,
             pdal_command,
-            progress=_print_progress,
+            progress=progress,
         )
+        progress.close()
 
     run_config = dict(config)
     source_mode = "copc_indexed" if bool(source.get("is_copc")) else "pdal_spatial_tiles"
@@ -243,7 +337,7 @@ def run_whole_cloud(
                 ),
             },
         }
-        write_json_reports(output_dir, report)
+        write_json_reports(output_dir, report, progress=progress)
         return report
     if not prepare_only:
         completed_tiles = 0
@@ -256,7 +350,7 @@ def run_whole_cloud(
             previous_report = _tile_report_path(tile_report_dir, ix, iy)
             if previous.get("status") == "done" and previous_report.is_file():
                 completed_tiles += 1
-                _print_progress("节理候选识别", completed_tiles, total_selected_tiles, f"跳过 {tile_id}")
+                progress("节理候选识别", completed_tiles, max(1, total_selected_tiles), f"跳过 {tile_id}")
                 continue
             if not tile_path.is_file():
                 error = f"未找到待处理源瓦片：{tile_path}"
@@ -264,7 +358,7 @@ def run_whole_cloud(
                 _mark_tile_error(processing_state, tile_id=tile_id, error=error)
                 _atomic_json(state_path, processing_state)
                 completed_tiles += 1
-                _print_progress("节理候选识别", completed_tiles, total_selected_tiles, f"失败 {tile_id}")
+                progress("节理候选识别", completed_tiles, max(1, total_selected_tiles), f"失败 {tile_id}")
                 continue
             pending_tiles.append((tile_path, tile_id, previous_report))
 
@@ -311,22 +405,27 @@ def run_whole_cloud(
                         if not keep_source_tiles:
                             tile_path.unlink()
                         completed_tiles += 1
-                        _print_progress("节理候选识别", completed_tiles, total_selected_tiles, f"完成 {tile_id}")
+                        progress("节理候选识别", completed_tiles, max(1, total_selected_tiles), f"完成 {tile_id}")
                     except Exception as exc:
                         error = f"{type(exc).__name__}: {exc}"
                         failures.append({"tile_id": tile_id, "error": error})
                         _mark_tile_error(processing_state, tile_id=tile_id, error=error)
                         _atomic_json(state_path, processing_state)
                         completed_tiles += 1
-                        _print_progress("节理候选识别", completed_tiles, total_selected_tiles, f"失败 {tile_id}")
-        print()
+                        progress("节理候选识别", completed_tiles, max(1, total_selected_tiles), f"失败 {tile_id}")
+        progress("节理候选识别", completed_tiles, max(1, total_selected_tiles), "完成")
+        progress.close()
 
     done_reports: list[dict[str, Any]] = []
     all_plane_rows: list[TilePlaneRecord] = []
     all_spacing_rows: list[SpacingRecord] = []
-    for report_path in sorted(tile_report_dir.glob("tile_*.json")):
+    report_paths = sorted(tile_report_dir.glob("tile_*.json"))
+    report_total = max(1, len(report_paths))
+    progress("读取瓦片报告", 0, report_total, f"共 {len(report_paths)} 个")
+    for report_index, report_path in enumerate(report_paths, start=1):
         tile_report = json.loads(report_path.read_text(encoding="utf-8"))
         if tile_report.get("status") != "done":
+            progress("读取瓦片报告", report_index, report_total, f"跳过 {report_path.name}")
             continue
         done_reports.append(tile_report)
         all_plane_rows.extend(
@@ -337,11 +436,15 @@ def run_whole_cloud(
             spacing_record_from_json(row)
             for row in tile_report.pop("spacing_rows_data", [])
         )
+        progress("读取瓦片报告", report_index, report_total, f"完成 {report_path.name}")
+    progress("读取瓦片报告", report_total, report_total, f"完成 {len(done_reports)} 个")
+    progress("整理瓦片记录", 0, 1, "排序平面和间距记录")
     all_plane_rows.sort(key=lambda row: (row["tile_id"], row["plane_id"]))
     all_spacing_rows.sort(
         key=lambda row: (row["tile_id"], row["plane_id_a"], row["plane_id_b"])
     )
-    aggregation = aggregate_global_results(all_plane_rows, plan, config)
+    progress("整理瓦片记录", 1, 1, f"平面 {len(all_plane_rows)} 条")
+    aggregation = aggregate_global_results(all_plane_rows, plan, config, progress=progress)
     merged_plane_rows = aggregation.merged_plane_rows
     global_plane_rows = aggregation.global_plane_rows
     global_spacing_rows = aggregation.spacing_rows
@@ -349,14 +452,19 @@ def run_whole_cloud(
 
     overlay_paths = sorted(overlay_dir.glob("tile_*.laz"), key=lambda path: _parse_tile_name(path))
     merged_overlay = output_dir / "candidate_detachment_points.laz"
-    selected_plane_indices_by_tile = prepare_selected_plane_indices_by_tile(aggregation)
+    selected_plane_indices_by_tile = prepare_selected_plane_indices_by_tile(
+        aggregation,
+        progress=progress,
+    )
     merged_count = _merge_overlays(
         overlay_paths,
         merged_overlay,
         source,
         source_crs,
         selected_plane_indices_by_tile,
+        progress=progress,
     )
+    progress("准备最终报告", 0, 1, "汇总输出统计")
     prepared_report = prepare_whole_cloud_report(
         source=source,
         plan=plan,
@@ -375,6 +483,7 @@ def run_whole_cloud(
         max_tiles=max_tiles,
         config=config,
     )
+    progress("准备最终报告", 1, 1, "完成")
     report = prepared_report.report
     trace_rows = prepared_report.trace_rows
     aperture_rows = prepared_report.aperture_rows
@@ -392,5 +501,7 @@ def run_whole_cloud(
         global_plane_fields=WHOLE_GLOBAL_PLANE_FIELDS,
         joint_set_fields=WHOLE_JOINT_SET_FIELDS,
         spacing_fields=WHOLE_SPACING_FIELDS,
+        progress=progress,
     )
+    progress.close()
     return report

@@ -209,11 +209,24 @@ class WholeCloudTilingTests(unittest.TestCase):
         global_rows = _aggregate_global_planes(groups, set_ids, load_config(None))
         self.assertEqual(len(global_rows), 2)
 
-        aggregate = _aggregate_global_results(rows, {"overlap_m": 1.0}, load_config(None))
+        progress_events: list[tuple[str, int, int, str]] = []
+        aggregate = _aggregate_global_results(
+            rows,
+            {"overlap_m": 1.0},
+            load_config(None),
+            progress=lambda stage, current, total, detail: progress_events.append(
+                (stage, current, total, detail)
+            ),
+        )
         self.assertEqual(len(aggregate.all_global_plane_rows), 2)
         self.assertEqual(len(aggregate.global_plane_rows), len(aggregate.selected_global_ids))
         self.assertTrue(set(aggregate.global_set_ids).issubset(set(aggregate.plane_groups)))
         self.assertEqual(aggregate.merged_plane_rows[0]["global_plane_id"], merged[0]["global_plane_id"])
+        progress_stages = {event[0] for event in progress_events}
+        self.assertIn("跨瓦片合并", progress_stages)
+        self.assertIn("全局候选筛选", progress_stages)
+        self.assertIn("间距与节理组统计", progress_stages)
+        self.assertTrue(all(0 <= current <= max(1, total) for _, current, total, _ in progress_events))
 
     def test_global_candidate_gate_uses_aggregated_quality_rows(self):
         rows = [

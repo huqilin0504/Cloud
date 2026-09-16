@@ -5,6 +5,7 @@ shapely==2.1.2
 laspy==2.7.0
 lazrs==0.8.2
 PyYAML==6.0.3
+tqdm==4.67.1
 pyproj==3.7.1
 pytest==9.1.1
 pluggy==1.6.0

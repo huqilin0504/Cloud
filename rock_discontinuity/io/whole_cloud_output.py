@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -150,25 +150,51 @@ def write_rows(
     path: Path,
     rows: Sequence[Mapping[str, Any]],
     fields: Sequence[str],
+    *,
+    progress: Callable[[str, int, int, str], None] | None = None,
+    stage: str | None = None,
 ) -> None:
+    progress_stage = stage or f"写出 {path.name}"
+    total = max(1, len(rows))
+    if progress is not None:
+        progress(progress_stage, 0, total, f"准备 {len(rows)} 行")
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(fields), extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        chunk_size = 4096
+        for start in range(0, len(rows), chunk_size):
+            stop = min(len(rows), start + chunk_size)
+            writer.writerows(rows[start:stop])
+            if progress is not None:
+                progress(progress_stage, stop, total, f"{path.name} {stop}/{len(rows)}")
+    if not rows and progress is not None:
+        progress(progress_stage, total, total, f"{path.name} 为空")
 
 
-def write_json_reports(output_dir: Path, report: dict[str, Any]) -> None:
+def write_json_reports(
+    output_dir: Path,
+    report: dict[str, Any],
+    *,
+    progress: Callable[[str, int, int, str], None] | None = None,
+    stage: str = "写出 JSON 报告",
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    for name, value in (
+    items = (
         ("data_audit.json", report.get("data_audit", {})),
         ("density_report.json", report.get("density_report", {})),
         ("run.json", report),
         ("whole_cloud_report.json", report),
-    ):
+    )
+    total = max(1, len(items))
+    if progress is not None:
+        progress(stage, 0, total, f"准备 {len(items)} 个文件")
+    for index, (name, value) in enumerate(items, start=1):
         (output_dir / name).write_text(
             json.dumps(value, ensure_ascii=False, indent=2, default=_json_default),
             encoding="utf-8",
         )
+        if progress is not None:
+            progress(stage, index, total, f"完成 {name}")
 
 
 def write_whole_cloud_outputs(
@@ -186,15 +212,46 @@ def write_whole_cloud_outputs(
     global_plane_fields: Sequence[str],
     joint_set_fields: Sequence[str],
     spacing_fields: Sequence[str],
+    progress: Callable[[str, int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     """Write all whole-cloud tables and JSON reports from prepared records."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    write_rows(output_dir / "detachment_planes.csv", plane_rows, plane_fields)
-    write_rows(output_dir / "joint_planes.csv", global_plane_rows, global_plane_fields)
-    write_rows(output_dir / "joint_sets.csv", joint_set_rows, joint_set_fields)
-    write_rows(output_dir / "spacings.csv", spacing_rows, spacing_fields)
-    write_rows(output_dir / "tile_spacings.csv", tile_spacing_rows, spacing_fields)
+    write_rows(
+        output_dir / "detachment_planes.csv",
+        plane_rows,
+        plane_fields,
+        progress=progress,
+        stage="写出 detachment_planes.csv",
+    )
+    write_rows(
+        output_dir / "joint_planes.csv",
+        global_plane_rows,
+        global_plane_fields,
+        progress=progress,
+        stage="写出 joint_planes.csv",
+    )
+    write_rows(
+        output_dir / "joint_sets.csv",
+        joint_set_rows,
+        joint_set_fields,
+        progress=progress,
+        stage="写出 joint_sets.csv",
+    )
+    write_rows(
+        output_dir / "spacings.csv",
+        spacing_rows,
+        spacing_fields,
+        progress=progress,
+        stage="写出 spacings.csv",
+    )
+    write_rows(
+        output_dir / "tile_spacings.csv",
+        tile_spacing_rows,
+        spacing_fields,
+        progress=progress,
+        stage="写出 tile_spacings.csv",
+    )
 
     trace_fields = [
         "plane_id",
@@ -205,7 +262,13 @@ def write_whole_cloud_outputs(
         "polyline_length_m",
         "reason",
     ]
-    write_rows(output_dir / "traces.csv", trace_rows, trace_fields)
+    write_rows(
+        output_dir / "traces.csv",
+        trace_rows,
+        trace_fields,
+        progress=progress,
+        stage="写出 traces.csv",
+    )
     aperture_fields = [
         "plane_id",
         "available",
@@ -214,9 +277,15 @@ def write_whole_cloud_outputs(
         "aperture_m",
         "reason",
     ]
-    write_rows(output_dir / "aperture.csv", aperture_rows, aperture_fields)
+    write_rows(
+        output_dir / "aperture.csv",
+        aperture_rows,
+        aperture_fields,
+        progress=progress,
+        stage="写出 aperture.csv",
+    )
     report = dict(report)
-    write_json_reports(output_dir, report)
+    write_json_reports(output_dir, report, progress=progress)
     return report
 
 

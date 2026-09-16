@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -137,14 +138,26 @@ def prepare_whole_cloud_report(
 
 def prepare_selected_plane_indices_by_tile(
     aggregation: GlobalAggregationResult,
+    *,
+    progress: Callable[[str, int, int, str], None] | None = None,
 ) -> dict[str, set[int]]:
     """Build the overlay selection map without touching the filesystem."""
 
     selected: dict[str, set[int]] = {}
-    for row in aggregation.merged_plane_rows:
+    rows = aggregation.merged_plane_rows
+    total = max(1, len(rows))
+    if progress is not None:
+        progress("准备候选点云筛选", 0, total, f"输入 {len(rows)} 个平面实例")
+    for index, row in enumerate(rows, start=1):
         if str(row["global_plane_id"]) not in aggregation.selected_global_ids:
+            if progress is not None:
+                progress("准备候选点云筛选", index, total, "淘汰")
             continue
         selected.setdefault(str(row["tile_id"]), set()).add(int(row["tile_plane_index"]))
+        if progress is not None:
+            progress("准备候选点云筛选", index, total, "保留")
+    if not rows and progress is not None:
+        progress("准备候选点云筛选", total, total, "无平面实例")
     return selected
 
 
