@@ -26,10 +26,12 @@ from ..core.models import (
 )
 from ..core.records import nearest_spacing_by_plane
 from .aggregation import (
+    XYBBoxIndex,
     planes_can_merge_rows,
     row_bbox,
     row_float,
     row_normal,
+    row_xy_bounds_array,
     tile_id_indices,
 )
 
@@ -66,9 +68,18 @@ def merge_plane_rows(
     normal_angle_deg = float(whole_config.get("merge_normal_angle_deg", 5.0))
     plane_offset_m = float(whole_config.get("merge_plane_offset_m", 0.08))
     xy_gap_m = float(whole_config.get("merge_xy_gap_m", 0.30))
+    merge_gap_m = max(xy_gap_m, 2.0 * float(plan["overlap_m"]))
     max_merged_rms_m = float(
         whole_config.get("merge_max_rms_m", config.get("plane", {}).get("max_rms", 0.05))
     )
+
+    row_xy_bounds = (
+        row_xy_bounds_array(rows)
+        if merge_enabled
+        else np.empty((0, 4), dtype=np.float64)
+    )
+    tile_size_m = max(float(plan.get("tile_size_m", 25.0)), 1e-6)
+    cell_size_m = max(tile_size_m / 4.0, merge_gap_m * 4.0, 1e-6)
 
     parent = list(range(len(rows)))
     component_members: dict[int, list[int]] = {index: [index] for index in range(len(rows))}
@@ -90,16 +101,30 @@ def merge_plane_rows(
         left_members = component_members[find(left)]
         right_members = component_members[find(right)]
         return all(
-            planes_can_merge_rows(
-                rows[a],
-                rows[b],
-                normal_angle_deg=normal_angle_deg,
-                plane_offset_m=plane_offset_m,
-                xy_gap_m=max(xy_gap_m, 2.0 * float(plan["overlap_m"])),
-                max_merged_rms_m=max_merged_rms_m,
-            )
+            _rows_can_merge(a, b, merge_gap_m)
             for a in left_members
             for b in right_members
+        )
+
+    def _rows_can_merge(left: int, right: int, gap: float) -> bool:
+        left_bounds = row_xy_bounds[left]
+        right_bounds = row_xy_bounds[right]
+        if not (
+            np.all(np.isfinite(left_bounds))
+            and np.all(np.isfinite(right_bounds))
+            and left_bounds[0] <= right_bounds[1] + gap
+            and left_bounds[1] >= right_bounds[0] - gap
+            and left_bounds[2] <= right_bounds[3] + gap
+            and left_bounds[3] >= right_bounds[2] - gap
+        ):
+            return False
+        return planes_can_merge_rows(
+            rows[left],
+            rows[right],
+            normal_angle_deg=normal_angle_deg,
+            plane_offset_m=plane_offset_m,
+            xy_gap_m=gap,
+            max_merged_rms_m=max_merged_rms_m,
         )
 
     by_tile: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -113,21 +138,49 @@ def merge_plane_rows(
     _notify(progress, "跨瓦片合并", 0, tile_total, f"候选瓦片 {len(tile_items)} 个")
     if merge_enabled:
         neighbour_offsets = ((1, -1), (1, 0), (1, 1), (0, 1))
+        candidate_pair_count = 0
+        accepted_pair_count = 0
         for tile_index, ((ix, iy), left_indices) in enumerate(tile_items, start=1):
+            _notify(
+                progress,
+                "跨瓦片合并",
+                tile_index - 1,
+                tile_total,
+                f"处理 {ix}_{iy}，空间候选 {candidate_pair_count} 对",
+            )
             for dx, dy in neighbour_offsets:
                 right_indices = by_tile.get((ix + dx, iy + dy), [])
+                if not right_indices:
+                    continue
+                _notify(
+                    progress,
+                    "跨瓦片合并",
+                    tile_index - 1,
+                    tile_total,
+                    f"处理 {ix}_{iy} 与 {ix + dx}_{iy + dy}",
+                )
+                right_index = XYBBoxIndex(
+                    row_xy_bounds,
+                    right_indices,
+                    cell_size=cell_size_m,
+                )
                 for left in left_indices:
-                    for right in right_indices:
-                        if planes_can_merge_rows(
-                            rows[left],
-                            rows[right],
-                            normal_angle_deg=normal_angle_deg,
-                            plane_offset_m=plane_offset_m,
-                            xy_gap_m=max(xy_gap_m, 2.0 * float(plan["overlap_m"])),
-                            max_merged_rms_m=max_merged_rms_m,
-                        ) and components_are_compatible(left, right):
+                    right_positions = right_index.query(row_xy_bounds[left], merge_gap_m)
+                    candidate_pair_count += len(right_positions)
+                    for right_position in right_positions:
+                        right = right_indices[right_position]
+                        if _rows_can_merge(left, right, merge_gap_m) and components_are_compatible(
+                            left, right
+                        ):
                             union(left, right)
-            _notify(progress, "跨瓦片合并", tile_index, tile_total, f"完成 {ix}_{iy}")
+                            accepted_pair_count += 1
+            _notify(
+                progress,
+                "跨瓦片合并",
+                tile_index,
+                tile_total,
+                f"完成 {ix}_{iy}，空间候选 {candidate_pair_count} 对，接受 {accepted_pair_count} 对",
+            )
         if not tile_items:
             _notify(progress, "跨瓦片合并", tile_total, tile_total, "无有效瓦片索引")
     else:

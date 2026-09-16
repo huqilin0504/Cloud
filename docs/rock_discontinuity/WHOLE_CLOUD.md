@@ -17,7 +17,7 @@
 - 去重：只输出每个核心块的点，内部边界半开，避免重叠区重复。
 - 恢复：每个块成功后写状态和报告；失败块保留源瓦片，使用 `--resume` 重试。
 - 维度声明：普通 LAS 当前为 `2d_xy_fallback`，完整 Z 保留在局部瓦片中；不会把 XY 网格伪称为三维体素切块。
-- 合并：每个块独立建立局部 KDTree 并计算 PCA/动态区域生长；块内先按法向角度、平面偏移、XY 边界间隙和合并后 RMS 合并局部片段，所有块完成后再比较相邻块并生成全局 `GJ-xxxxx` 节理面。切块、状态、单块处理、全局聚合、记录准备和全点云写出分别位于 `tiling.py`、`state.py`、`tile_processing.py`、`global_aggregation.py`、`output_records.py` 和 `io/whole_cloud_output.py`；命令解析位于 `app/whole_cloud.py`。
+- 合并：每个块独立建立局部 KDTree 并计算 PCA/动态区域生长；块内先按法向角度、平面偏移、XY 边界间隙和合并后 RMS 合并局部片段，所有块完成后再比较相邻块并生成全局 `GJ-xxxxx` 节理面。跨块比较先使用保守的 XY 包围盒网格索引筛出必要候选，再执行原有法向、平面偏移、足迹间隙和 RMS 精确判据；索引只减少不可能接触的组合，不改变合并阈值。切块、状态、单块处理、全局聚合、记录准备和全点云写出分别位于 `tiling.py`、`state.py`、`tile_processing.py`、`global_aggregation.py`、`output_records.py` 和 `io/whole_cloud_output.py`；命令解析位于 `app/whole_cloud.py`。
 
 该策略对应 PDAL 官方的 `length`、`origin_x/y` 和 `buffer` 语义；大文件读写使用 laspy 的 `chunk_iterator` 和分块写入方式：[PDAL splitter](https://pdal.io/en/2.9.1/stages/filters.splitter.html)、[laspy 大文件分块读写](https://laspy.readthedocs.io/en/latest/basic.html)。
 

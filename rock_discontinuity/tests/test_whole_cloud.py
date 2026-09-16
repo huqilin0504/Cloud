@@ -228,6 +228,77 @@ class WholeCloudTilingTests(unittest.TestCase):
         self.assertIn("间距与节理组统计", progress_stages)
         self.assertTrue(all(0 <= current <= max(1, total) for _, current, total, _ in progress_events))
 
+    def test_cross_tile_bbox_index_prunes_disjoint_pairs_before_exact_gate(self):
+        def row(tile_id: str, plane_id: str, x0: float) -> dict:
+            return {
+                "tile_id": tile_id,
+                "plane_id": plane_id,
+                "global_plane_id": f"{tile_id}:{plane_id}",
+                "core_red_points": 100,
+                "bbox_min_x": x0,
+                "bbox_max_x": x0 + 0.5,
+                "bbox_min_y": 0.0,
+                "bbox_max_y": 0.5,
+                "bbox_min_z": 0.0,
+                "bbox_max_z": 0.5,
+            }
+
+        rows = [
+            *(row("0_0", f"L{index}", float(index)) for index in range(100)),
+            *(row("1_0", f"R{index}", 1_000.0 + float(index)) for index in range(100)),
+        ]
+        with patch(
+            "rock_discontinuity.processing.global_aggregation.planes_can_merge_rows",
+            return_value=False,
+        ) as exact_gate:
+            _, groups, _ = _merge_plane_rows(
+                rows,
+                {"tile_size_m": 40.0, "overlap_m": 0.05},
+                load_config(None),
+            )
+        self.assertEqual(len(groups), len(rows))
+        exact_gate.assert_not_called()
+
+    def test_cross_tile_bbox_index_keeps_footprint_extent_outside_fit_bbox(self):
+        def row(tile_id: str, plane_id: str, bbox_x: float, footprint_x: float) -> dict:
+            return {
+                "tile_id": tile_id,
+                "plane_id": plane_id,
+                "global_plane_id": f"{tile_id}:{plane_id}",
+                "core_red_points": 100,
+                "nx": 0.0,
+                "ny": 0.0,
+                "nz": 1.0,
+                "plane_d": 0.0,
+                "center_x": bbox_x + 0.05,
+                "center_y": 0.5,
+                "center_z": 0.0,
+                "bbox_min_x": bbox_x,
+                "bbox_max_x": bbox_x + 0.1,
+                "bbox_min_y": 0.0,
+                "bbox_max_y": 1.0,
+                "bbox_min_z": 0.0,
+                "bbox_max_z": 0.0,
+                "rms_m": 0.001,
+                "_footprint_xyz": [[
+                    [footprint_x, 0.0, 0.0],
+                    [footprint_x + 1.0, 0.0, 0.0],
+                    [footprint_x + 1.0, 1.0, 0.0],
+                    [footprint_x, 1.0, 0.0],
+                ]],
+            }
+
+        rows = [
+            row("0_0", "L1", 0.0, 10.0),
+            row("1_0", "R1", 100.0, 11.1),
+        ]
+        _, groups, _ = _merge_plane_rows(
+            rows,
+            {"tile_size_m": 40.0, "overlap_m": 0.05},
+            load_config(None),
+        )
+        self.assertEqual(len(groups), 1)
+
     def test_global_candidate_gate_uses_aggregated_quality_rows(self):
         rows = [
             {

@@ -47,6 +47,132 @@ def row_bbox(row: dict[str, Any]) -> tuple[np.ndarray, np.ndarray] | None:
     return None
 
 
+def row_xy_bounds_array(rows: list[dict[str, Any]]) -> np.ndarray:
+    """Return conservative XY bounds for serialized plane rows.
+
+    The bounds enclose both the fitted-row bbox and every valid footprint
+    vertex.  This makes them a safe necessary-condition filter for both
+    branches of ``planes_can_merge_rows``: a footprint distance or a 3-D
+    bbox distance cannot be within the merge gap when the corresponding XY
+    bounds are farther apart.
+    """
+
+    bounds = np.full((len(rows), 4), np.nan, dtype=np.float64)
+    for index, row in enumerate(rows):
+        bbox = row_bbox(row)
+        if bbox is None:
+            continue
+        lower, upper = bbox
+        values = np.asarray(
+            [lower[0], upper[0], lower[1], upper[1]],
+            dtype=np.float64,
+        )
+        if not np.all(np.isfinite(values)):
+            continue
+        values = np.asarray(
+            [
+                min(float(values[0]), float(values[1])),
+                max(float(values[0]), float(values[1])),
+                min(float(values[2]), float(values[3])),
+                max(float(values[2]), float(values[3])),
+            ],
+            dtype=np.float64,
+        )
+        footprint = row.get("_footprint_xyz")
+        if footprint:
+            for ring in footprint:
+                try:
+                    points = np.asarray(ring, dtype=np.float64)
+                except (TypeError, ValueError):
+                    continue
+                if points.ndim != 2 or points.shape[1] != 3:
+                    continue
+                finite_points = points[np.all(np.isfinite(points), axis=1)]
+                if not len(finite_points):
+                    continue
+                values[0] = min(values[0], float(np.min(finite_points[:, 0])))
+                values[1] = max(values[1], float(np.max(finite_points[:, 0])))
+                values[2] = min(values[2], float(np.min(finite_points[:, 1])))
+                values[3] = max(values[3], float(np.max(finite_points[:, 1])))
+        bounds[index] = values
+    return bounds
+
+
+class XYBBoxIndex:
+    """Small temporary grid index for one neighbouring tile's plane rows."""
+
+    def __init__(
+        self,
+        bounds: np.ndarray,
+        row_indices: list[int],
+        *,
+        cell_size: float,
+        max_cells_per_row: int = 4096,
+    ) -> None:
+        self.bounds = bounds
+        self.row_indices = row_indices
+        self.cell_size = max(float(cell_size), 1e-9)
+        self.max_cells_per_query = int(max_cells_per_row)
+        self.cells: dict[tuple[int, int], list[int]] = {}
+        self.large_positions: list[int] = []
+        for position, row_index in enumerate(row_indices):
+            row_bounds = bounds[row_index]
+            if not np.all(np.isfinite(row_bounds)):
+                continue
+            x0, x1, y0, y1 = self._cell_range(row_bounds)
+            cell_count = (x1 - x0 + 1) * (y1 - y0 + 1)
+            if cell_count > max_cells_per_row:
+                self.large_positions.append(position)
+                continue
+            for cell_x in range(x0, x1 + 1):
+                for cell_y in range(y0, y1 + 1):
+                    self.cells.setdefault((cell_x, cell_y), []).append(position)
+
+    def _cell_range(self, row_bounds: np.ndarray) -> tuple[int, int, int, int]:
+        return (
+            int(np.floor(row_bounds[0] / self.cell_size)),
+            int(np.floor(row_bounds[1] / self.cell_size)),
+            int(np.floor(row_bounds[2] / self.cell_size)),
+            int(np.floor(row_bounds[3] / self.cell_size)),
+        )
+
+    def query(self, query_bounds: np.ndarray, gap: float) -> list[int]:
+        """Return original row positions whose expanded XY boxes intersect."""
+
+        if not np.all(np.isfinite(query_bounds)):
+            return []
+        gap = max(float(gap), 0.0)
+        expanded = np.asarray(
+            [
+                query_bounds[0] - gap,
+                query_bounds[1] + gap,
+                query_bounds[2] - gap,
+                query_bounds[3] + gap,
+            ],
+            dtype=np.float64,
+        )
+        x0, x1, y0, y1 = self._cell_range(expanded)
+        cell_count = (x1 - x0 + 1) * (y1 - y0 + 1)
+        if cell_count > self.max_cells_per_query:
+            positions = set(range(len(self.row_indices)))
+        else:
+            positions = set(self.large_positions)
+            for cell_x in range(x0, x1 + 1):
+                for cell_y in range(y0, y1 + 1):
+                    positions.update(self.cells.get((cell_x, cell_y), ()))
+        result: list[int] = []
+        for position in sorted(positions):
+            row_bounds = self.bounds[self.row_indices[position]]
+            if (
+                row_bounds[0] <= expanded[1]
+                and row_bounds[1] >= expanded[0]
+                and row_bounds[2] <= expanded[3]
+                and row_bounds[3] >= expanded[2]
+            ):
+                result.append(position)
+        return result
+
+
 def tile_id_indices(tile_id: str) -> tuple[int, int] | None:
     try:
         left, right = str(tile_id).split("_", 1)
@@ -110,4 +236,3 @@ def planes_can_merge_rows(
         return footprint_gap <= xy_gap_m
     gap = np.maximum(0.0, np.maximum(lower_a, lower_b) - np.minimum(upper_a, upper_b))
     return float(np.linalg.norm(gap)) <= xy_gap_m
-
