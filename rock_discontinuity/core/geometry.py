@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -229,13 +230,24 @@ def split_axial_by_deviation(
     indices: np.ndarray,
     normals: np.ndarray,
     max_deviation_rad: float,
+    *,
+    progress: Callable[[int, int, int], None] | None = None,
 ) -> list[np.ndarray]:
-    """Split an axial-orientation component with O(N) memory.
+    """Split an axial-orientation component with bounded recursive work.
 
-    The former implementation selected an exact medoid from an angle matrix.
-    Here the principal eigenvector of the normal outer-product sum is the
-    axial mean direction; selecting points around it preserves the same
-    maximum-deviation gate without an O(N²) allocation.
+    A connected-component clustering of directions can suffer from chaining:
+    two distant orientations become one component through many small angular
+    steps.  Repeatedly removing a cap around one global centre is both slow and
+    unstable for such a component.  This implementation recursively bisects
+    any component whose axial PCA centre exceeds ``max_deviation_rad``.  Each
+    bisection uses a small axial two-means refinement, so every accepted leaf
+    still satisfies the same centre-to-normal angular gate while all input
+    indices are retained exactly once.
+
+    ``progress`` receives ``(assigned_count, total_count, leaf_count)`` after
+    accepted leaves.  It is intentionally throttled to at most about 1,000
+    callbacks for large components so terminal reporting does not become a
+    new bottleneck.
     """
 
     selected_indices = np.asarray(indices, dtype=np.int64)
@@ -252,23 +264,90 @@ def split_axial_by_deviation(
     if np.any(~np.isfinite(norms)) or np.any(norms <= 1e-15):
         raise ValueError("normals 不能包含零向量或非有限值")
     unit = values / norms
-    remaining = np.ones(len(selected_indices), dtype=bool)
+    selected_unit = unit[selected_indices]
+    total_count = len(selected_indices)
     cosine_limit = float(np.cos(max_deviation))
     groups: list[np.ndarray] = []
-    while np.any(remaining):
-        positions = np.flatnonzero(remaining)
-        candidate_indices = selected_indices[positions]
-        candidate_normals = unit[candidate_indices]
-        scatter = candidate_normals.T @ candidate_normals
+    assigned_count = 0
+    last_reported = 0
+    report_stride = max(1, total_count // 1000)
+
+    def axial_center(points: np.ndarray) -> np.ndarray:
+        scatter = points.T @ points
         _, eigenvectors = np.linalg.eigh(scatter)
-        center = eigenvectors[:, -1]
+        center = np.asarray(eigenvectors[:, -1], dtype=np.float64)
         center /= max(float(np.linalg.norm(center)), 1e-15)
+        return center
+
+    def emit_progress(*, force: bool = False) -> None:
+        nonlocal last_reported
+        if progress is None:
+            return
+        if force or assigned_count - last_reported >= report_stride:
+            progress(assigned_count, total_count, len(groups))
+            last_reported = assigned_count
+
+    # Stack entries are positions in selected_unit, not global normal indices.
+    pending: list[np.ndarray] = [np.arange(total_count, dtype=np.int64)]
+    while pending:
+        positions = pending.pop()
+        candidate_normals = selected_unit[positions]
+        center = axial_center(candidate_normals)
         cosine = np.abs(candidate_normals @ center)
-        picked = positions[cosine >= cosine_limit - 1e-12]
-        if not len(picked):
-            picked = positions[:1]
-        groups.append(selected_indices[picked])
-        remaining[picked] = False
+        if len(positions) <= 1 or float(np.min(cosine)) >= cosine_limit - 1e-12:
+            groups.append(selected_indices[positions])
+            assigned_count += len(positions)
+            emit_progress()
+            continue
+
+        # Choose two axially distant deterministic seeds.  Using the point
+        # farthest from the current centre first prevents a broad component
+        # from repeatedly selecting only its densest pole.
+        first_seed = candidate_normals[int(np.argmin(cosine))]
+        distance_from_first = np.abs(candidate_normals @ first_seed)
+        second_seed = candidate_normals[int(np.argmin(distance_from_first))]
+        seeds = np.stack((first_seed, second_seed), axis=0)
+        labels: np.ndarray | None = None
+        for _ in range(8):
+            new_labels = np.argmax(np.abs(candidate_normals @ seeds.T), axis=1)
+            if labels is not None and np.array_equal(labels, new_labels):
+                break
+            labels = new_labels
+            if not np.any(labels == 0) or not np.any(labels == 1):
+                break
+            seeds = np.stack(
+                (
+                    axial_center(candidate_normals[labels == 0]),
+                    axial_center(candidate_normals[labels == 1]),
+                ),
+                axis=0,
+            )
+
+        if labels is None or not np.any(labels == 0) or not np.any(labels == 1):
+            # Degenerate seed pairs can occur for nearly identical axial
+            # normals.  Split by the current angular order as a guaranteed
+            # progress fallback; child components are checked again above.
+            order = np.argsort(-cosine, kind="stable")
+            fallback_labels = np.ones(len(positions), dtype=np.int8)
+            fallback_labels[order[: max(1, len(order) // 2)]] = 0
+            labels = fallback_labels
+
+        assert labels is not None
+        left = positions[labels == 0]
+        right = positions[labels == 1]
+        if not len(left) or not len(right):
+            # This is defensive only; the fallback above should make both
+            # sides non-empty for every component larger than one.
+            groups.append(selected_indices[positions])
+            assigned_count += len(positions)
+            emit_progress()
+            continue
+        # Push right first so the deterministic left branch is processed
+        # first when the stack is popped.
+        pending.append(right)
+        pending.append(left)
+
+    emit_progress(force=True)
     return groups
 
 

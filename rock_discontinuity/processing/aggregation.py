@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -13,15 +14,18 @@ from ..core.geometry import (
 )
 
 
-def row_float(row: dict[str, Any], field: str) -> float | None:
+def row_float(row: Mapping[str, Any], field: str) -> float | None:
+    raw_value = row.get(field)
+    if raw_value is None:
+        return None
     try:
-        value = float(row.get(field))
+        value = float(raw_value)
     except (TypeError, ValueError):
         return None
     return value if np.isfinite(value) else None
 
 
-def row_normal(row: dict[str, Any]) -> np.ndarray | None:
+def row_normal(row: Mapping[str, Any]) -> np.ndarray | None:
     values = [row_float(row, field) for field in ("nx", "ny", "nz")]
     if any(value is None for value in values):
         return None
@@ -32,7 +36,7 @@ def row_normal(row: dict[str, Any]) -> np.ndarray | None:
     return normal / norm
 
 
-def row_bbox(row: dict[str, Any]) -> tuple[np.ndarray, np.ndarray] | None:
+def row_bbox(row: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray] | None:
     lower_values = [row_float(row, f"bbox_min_{axis}") for axis in "xyz"]
     upper_values = [row_float(row, f"bbox_max_{axis}") for axis in "xyz"]
     if all(value is not None for value in lower_values + upper_values):
@@ -47,7 +51,7 @@ def row_bbox(row: dict[str, Any]) -> tuple[np.ndarray, np.ndarray] | None:
     return None
 
 
-def row_xy_bounds_array(rows: list[dict[str, Any]]) -> np.ndarray:
+def row_xy_bounds_array(rows: Sequence[Mapping[str, Any]]) -> np.ndarray:
     """Return conservative XY bounds for serialized plane rows.
 
     The bounds enclose both the fitted-row bbox and every valid footprint
@@ -182,8 +186,8 @@ def tile_id_indices(tile_id: str) -> tuple[int, int] | None:
 
 
 def planes_can_merge_rows(
-    row_a: dict[str, Any],
-    row_b: dict[str, Any],
+    row_a: Mapping[str, Any],
+    row_b: Mapping[str, Any],
     *,
     normal_angle_deg: float,
     plane_offset_m: float,
@@ -192,32 +196,58 @@ def planes_can_merge_rows(
 ) -> bool:
     """Apply the cross-tile merge gate to two serialized plane rows."""
 
+    return plane_merge_reason(
+        row_a,
+        row_b,
+        normal_angle_deg=normal_angle_deg,
+        plane_offset_m=plane_offset_m,
+        xy_gap_m=xy_gap_m,
+        max_merged_rms_m=max_merged_rms_m,
+    ) == "accepted"
+
+
+def plane_merge_reason(
+    row_a: Mapping[str, Any],
+    row_b: Mapping[str, Any],
+    *,
+    normal_angle_deg: float,
+    plane_offset_m: float,
+    xy_gap_m: float,
+    max_merged_rms_m: float | None = None,
+) -> str:
+    """Return the first gate that rejects a cross-tile plane pair.
+
+    The predicate is deliberately kept in the same order as the historical
+    boolean gate.  The extra reason string makes a large run auditable without
+    changing which pairs are eligible for merging.
+    """
+
     normal_a = row_normal(row_a)
     normal_b = row_normal(row_b)
     d_a = row_float(row_a, "plane_d")
     d_b = row_float(row_b, "plane_d")
     if normal_a is None or normal_b is None or d_a is None or d_b is None:
-        return False
+        return "invalid_normal_or_plane"
     angle = axial_normal_angle_deg(normal_a, normal_b)
     if angle is None or angle > float(normal_angle_deg):
-        return False
+        return "normal_angle"
     aligned = align_plane_equation(normal_a, d_a, normal_b, d_b)
     if aligned is None:
-        return False
+        return "invalid_normal_or_plane"
     normal_a, d_a, _, d_b = aligned
     if abs(d_a - d_b) > plane_offset_m:
-        return False
+        return "plane_offset"
     if max_merged_rms_m is not None:
         rms_a = row_float(row_a, "rms_m")
         rms_b = row_float(row_b, "rms_m")
         if rms_a is not None and rms_a > max_merged_rms_m:
-            return False
+            return "rms"
         if rms_b is not None and rms_b > max_merged_rms_m:
-            return False
+            return "rms"
     bbox_a = row_bbox(row_a)
     bbox_b = row_bbox(row_b)
     if bbox_a is None or bbox_b is None:
-        return False
+        return "missing_bbox"
     lower_a, upper_a = bbox_a
     lower_b, upper_b = bbox_b
     footprint_gap = footprint_gap_on_plane(
@@ -233,6 +263,6 @@ def planes_can_merge_rows(
         normal_a,
     )
     if footprint_gap is not None:
-        return footprint_gap <= xy_gap_m
+        return "accepted" if footprint_gap <= xy_gap_m else "footprint_gap"
     gap = np.maximum(0.0, np.maximum(lower_a, lower_b) - np.minimum(upper_a, upper_b))
-    return float(np.linalg.norm(gap)) <= xy_gap_m
+    return "accepted" if float(np.linalg.norm(gap)) <= xy_gap_m else "bbox_gap"

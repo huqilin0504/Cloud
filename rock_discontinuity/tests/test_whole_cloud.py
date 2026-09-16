@@ -222,6 +222,11 @@ class WholeCloudTilingTests(unittest.TestCase):
         self.assertEqual(len(aggregate.global_plane_rows), len(aggregate.selected_global_ids))
         self.assertTrue(set(aggregate.global_set_ids).issubset(set(aggregate.plane_groups)))
         self.assertEqual(aggregate.merged_plane_rows[0]["global_plane_id"], merged[0]["global_plane_id"])
+        self.assertEqual(aggregate.merge_diagnostics["accepted_pairs"], 1)
+        self.assertEqual(
+            aggregate.orientation_diagnostics["provisional"]["split_method"],
+            "adaptive_axial_bisection",
+        )
         progress_stages = {event[0] for event in progress_events}
         self.assertIn("跨瓦片合并", progress_stages)
         self.assertIn("全局候选筛选", progress_stages)
@@ -298,6 +303,44 @@ class WholeCloudTilingTests(unittest.TestCase):
             load_config(None),
         )
         self.assertEqual(len(groups), 1)
+
+    def test_cross_tile_merge_reports_normal_gate_rejections(self):
+        def row(tile_id: str, plane_id: str, normal: tuple[float, float, float]) -> dict:
+            return {
+                "tile_id": tile_id,
+                "plane_id": plane_id,
+                "global_plane_id": f"{tile_id}:{plane_id}",
+                "core_red_points": 100,
+                "nx": normal[0],
+                "ny": normal[1],
+                "nz": normal[2],
+                "plane_d": 0.0,
+                "center_x": 0.5,
+                "center_y": 0.5,
+                "center_z": 0.0,
+                "bbox_min_x": 0.0,
+                "bbox_max_x": 1.0,
+                "bbox_min_y": 0.0,
+                "bbox_max_y": 1.0,
+                "bbox_min_z": 0.0,
+                "bbox_max_z": 0.0,
+                "rms_m": 0.001,
+            }
+
+        diagnostics: dict[str, object] = {}
+        _, groups, _ = _merge_plane_rows(
+            [
+                row("0_0", "L1", (0.0, 0.0, 1.0)),
+                row("1_0", "R1", (1.0, 0.0, 0.0)),
+            ],
+            {"tile_size_m": 40.0, "overlap_m": 0.05},
+            load_config(None),
+            diagnostics=diagnostics,
+        )
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(diagnostics["spatial_candidate_pairs"], 1)
+        self.assertEqual(diagnostics["gate_accepted_pairs"], 0)
+        self.assertEqual(diagnostics["rejection_counts"], {"normal_angle": 1})
 
     def test_global_candidate_gate_uses_aggregated_quality_rows(self):
         rows = [

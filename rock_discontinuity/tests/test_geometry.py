@@ -10,6 +10,7 @@ from rock_discontinuity.core.geometry import (
     plane_basis,
     project_to_plane,
     sparse_axial_dbscan_labels,
+    split_axial_by_deviation,
 )
 
 
@@ -65,6 +66,59 @@ class GeometryTests(unittest.TestCase):
         normals = np.repeat(np.array([[0.0, 0.0, 1.0]]), 20_000, axis=0)
         labels = sparse_axial_dbscan_labels(normals, np.deg2rad(10.0))
         self.assertEqual(len(np.unique(labels)), 1)
+
+    def test_adaptive_axial_split_retains_points_and_respects_deviation(self):
+        def unit(vector):
+            vector = np.asarray(vector, dtype=float)
+            return vector / np.linalg.norm(vector)
+
+        normals = np.asarray(
+            [
+                [0.0, 0.0, 1.0],
+                [np.sin(np.deg2rad(5.0)), 0.0, np.cos(np.deg2rad(5.0))],
+                [-np.sin(np.deg2rad(4.0)), 0.0, np.cos(np.deg2rad(4.0))],
+                [0.0, 0.0, -1.0],
+                [1.0, 0.0, 0.0],
+                [np.cos(np.deg2rad(5.0)), np.sin(np.deg2rad(5.0)), 0.0],
+                [np.cos(np.deg2rad(4.0)), -np.sin(np.deg2rad(4.0)), 0.0],
+                [-1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, np.cos(np.deg2rad(5.0)), np.sin(np.deg2rad(5.0))],
+                [0.0, np.cos(np.deg2rad(4.0)), -np.sin(np.deg2rad(4.0))],
+                [0.0, -1.0, 0.0],
+            ],
+            dtype=float,
+        )
+        normals = np.asarray(
+            [value if index % 2 else -value for index, value in enumerate(normals)],
+            dtype=float,
+        )
+        indices = np.array([8, 2, 10, 0, 7, 4, 11, 1, 5, 3, 9, 6], dtype=np.int64)
+        events: list[tuple[int, int, int]] = []
+        groups = split_axial_by_deviation(
+            indices,
+            normals,
+            np.deg2rad(12.0),
+            progress=lambda assigned, total, leaves: events.append(
+                (assigned, total, leaves)
+            ),
+        )
+
+        flattened = np.concatenate(groups)
+        self.assertEqual(sorted(flattened.tolist()), sorted(indices.tolist()))
+        self.assertEqual(len(np.unique(flattened)), len(indices))
+        self.assertLess(len(groups), len(indices))
+        for group in groups:
+            scatter = normals[group].T @ normals[group]
+            _, eigenvectors = np.linalg.eigh(scatter)
+            center = unit(eigenvectors[:, -1])
+            deviations = [
+                np.degrees(np.arccos(np.clip(abs(float(np.dot(center, normals[index]))), 0.0, 1.0)))
+                for index in group
+            ]
+            self.assertLessEqual(max(deviations), 12.0 + 1e-8)
+        self.assertTrue(events)
+        self.assertEqual(events[-1][:2], (len(indices), len(indices)))
 
 
 if __name__ == "__main__":

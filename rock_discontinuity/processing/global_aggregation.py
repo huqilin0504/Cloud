@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -27,6 +27,7 @@ from ..core.models import (
 from ..core.records import nearest_spacing_by_plane
 from .aggregation import (
     XYBBoxIndex,
+    plane_merge_reason,
     planes_can_merge_rows,
     row_bbox,
     row_float,
@@ -56,22 +57,42 @@ def merge_plane_rows(
     config: dict[str, Any],
     *,
     progress: ProgressCallback | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[TilePlaneRecord], dict[str, list[TilePlaneRecord]], dict[str, str]]:
     """Merge plane instances touching neighbouring tile boundaries."""
 
-    rows = [dict(row) for row in rows]
-    if not rows:
-        _notify(progress, "跨瓦片合并", 1, 1, "无平面记录")
-        return rows, {}, {}
+    rows = cast(list[TilePlaneRecord], [dict(row) for row in rows])
     whole_config = config.get("whole_cloud", {})
     merge_enabled = bool(whole_config.get("merge_enabled", True))
-    normal_angle_deg = float(whole_config.get("merge_normal_angle_deg", 5.0))
+    normal_angle_threshold_deg = float(whole_config.get("merge_normal_angle_deg", 5.0))
     plane_offset_m = float(whole_config.get("merge_plane_offset_m", 0.08))
     xy_gap_m = float(whole_config.get("merge_xy_gap_m", 0.30))
-    merge_gap_m = max(xy_gap_m, 2.0 * float(plan["overlap_m"]))
+    merge_gap_m = max(xy_gap_m, 2.0 * float(plan.get("overlap_m", 0.0)))
     max_merged_rms_m = float(
         whole_config.get("merge_max_rms_m", config.get("plane", {}).get("max_rms", 0.05))
     )
+
+    if not rows:
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "enabled": merge_enabled,
+                    "tile_count": 0,
+                    "indexed_rows": 0,
+                    "unindexed_rows": 0,
+                    "spatial_candidate_pairs": 0,
+                    "gate_accepted_pairs": 0,
+                    "accepted_pairs": 0,
+                    "complete_linkage_rejected": 0,
+                    "rejection_counts": {},
+                    "effective_gap_m": merge_gap_m,
+                    "normal_angle_threshold_deg": normal_angle_threshold_deg,
+                    "plane_offset_threshold_m": plane_offset_m,
+                    "max_rms_threshold_m": max_merged_rms_m,
+                }
+            )
+        _notify(progress, "跨瓦片合并", 1, 1, "无平面记录")
+        return rows, {}, {}
 
     row_xy_bounds = (
         row_xy_bounds_array(rows)
@@ -83,6 +104,12 @@ def merge_plane_rows(
 
     parent = list(range(len(rows)))
     component_members: dict[int, list[int]] = {index: [index] for index in range(len(rows))}
+    indexed_mask = np.all(np.isfinite(row_xy_bounds), axis=1)
+    candidate_pair_count = 0
+    gate_accepted_pair_count = 0
+    accepted_pair_count = 0
+    complete_linkage_rejected = 0
+    rejection_counts: Counter[str] = Counter()
 
     def find(index: int) -> int:
         while parent[index] != index:
@@ -121,7 +148,7 @@ def merge_plane_rows(
         return planes_can_merge_rows(
             rows[left],
             rows[right],
-            normal_angle_deg=normal_angle_deg,
+            normal_angle_deg=normal_angle_threshold_deg,
             plane_offset_m=plane_offset_m,
             xy_gap_m=gap,
             max_merged_rms_m=max_merged_rms_m,
@@ -138,8 +165,6 @@ def merge_plane_rows(
     _notify(progress, "跨瓦片合并", 0, tile_total, f"候选瓦片 {len(tile_items)} 个")
     if merge_enabled:
         neighbour_offsets = ((1, -1), (1, 0), (1, 1), (0, 1))
-        candidate_pair_count = 0
-        accepted_pair_count = 0
         for tile_index, ((ix, iy), left_indices) in enumerate(tile_items, start=1):
             _notify(
                 progress,
@@ -169,11 +194,23 @@ def merge_plane_rows(
                     candidate_pair_count += len(right_positions)
                     for right_position in right_positions:
                         right = right_indices[right_position]
-                        if _rows_can_merge(left, right, merge_gap_m) and components_are_compatible(
-                            left, right
-                        ):
-                            union(left, right)
-                            accepted_pair_count += 1
+                        reason = plane_merge_reason(
+                            rows[left],
+                            rows[right],
+                            normal_angle_deg=normal_angle_threshold_deg,
+                            plane_offset_m=plane_offset_m,
+                            xy_gap_m=merge_gap_m,
+                            max_merged_rms_m=max_merged_rms_m,
+                        )
+                        if reason != "accepted":
+                            rejection_counts[reason] += 1
+                            continue
+                        gate_accepted_pair_count += 1
+                        if not components_are_compatible(left, right):
+                            complete_linkage_rejected += 1
+                            continue
+                        union(left, right)
+                        accepted_pair_count += 1
             _notify(
                 progress,
                 "跨瓦片合并",
@@ -207,6 +244,24 @@ def merge_plane_rows(
             row["global_tile_count"] = tile_count
             row.setdefault("global_set_id", None)
         _notify(progress, "建立全局平面组", group_index, group_total, f"完成 {global_id}")
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "enabled": merge_enabled,
+                "tile_count": len(tile_items),
+                "indexed_rows": int(np.count_nonzero(indexed_mask)),
+                "unindexed_rows": int(len(rows) - np.count_nonzero(indexed_mask)),
+                "spatial_candidate_pairs": candidate_pair_count,
+                "gate_accepted_pairs": gate_accepted_pair_count,
+                "accepted_pairs": accepted_pair_count,
+                "complete_linkage_rejected": complete_linkage_rejected,
+                "rejection_counts": dict(sorted(rejection_counts.items())),
+                "effective_gap_m": merge_gap_m,
+                "normal_angle_threshold_deg": normal_angle_threshold_deg,
+                "plane_offset_threshold_m": plane_offset_m,
+                "max_rms_threshold_m": max_merged_rms_m,
+            }
+        )
     return rows, groups, old_to_global
 
 
@@ -216,46 +271,115 @@ def global_orientation_sets(
     *,
     progress: ProgressCallback | None = None,
     stage: str = "全局方向聚类",
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     if not groups:
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "input_plane_groups": 0,
+                    "initial_orientation_components": 0,
+                    "initial_largest_component": 0,
+                    "orientation_set_count": 0,
+                    "set_size_min": 0,
+                    "set_size_max": 0,
+                    "set_size_p50": 0.0,
+                    "set_size_p90": 0.0,
+                    "set_size_p99": 0.0,
+                    "split_method": "adaptive_axial_bisection",
+                    "max_deviation_deg": 0.0,
+                }
+            )
         _notify(progress, stage, 1, 1, "无平面组")
         return {}
-    _notify(progress, stage, 0, 3, f"输入 {len(groups)} 个平面组")
     group_ids = sorted(groups)
+    orientation_total = len(group_ids) + 2
+    _notify(progress, stage, 0, orientation_total, f"输入 {len(groups)} 个平面组")
     normal_array = np.empty((len(group_ids), 3), dtype=np.float64)
+    group_weights = np.zeros(len(group_ids), dtype=np.float64)
     for index, group_id in enumerate(group_ids):
         members = groups[group_id]
         representative = max(members, key=lambda row: row_float(row, "core_red_points") or 0.0)
         normal = row_normal(representative)
         normal_array[index] = normal if normal is not None else np.array([0.0, 0.0, 1.0])
-    _notify(progress, stage, 1, 3, "代表法向量完成")
+        group_weights[index] = row_float(representative, "core_red_points") or 0.0
+    _notify(progress, stage, 1, orientation_total, "代表法向量完成")
     joint_config = config.get("joint_sets", {})
     eps = np.deg2rad(float(joint_config.get("angular_eps_deg", 10.0)))
     labels = sparse_axial_dbscan_labels(normal_array, eps)
-    _notify(progress, stage, 2, 3, f"初始方向簇 {len(np.unique(labels))} 个")
+    unique_labels = sorted(int(value) for value in np.unique(labels))
+    largest_component = max(
+        (int(np.count_nonzero(labels == label)) for label in unique_labels),
+        default=0,
+    )
+    _notify(progress, stage, 2, orientation_total, f"初始方向簇 {len(unique_labels)} 个")
     max_deviation = np.deg2rad(float(joint_config.get("max_set_deviation_deg", 12.0)))
     index_groups: list[list[int]] = []
-    for label in sorted(int(value) for value in np.unique(labels)):
+    component_offset = 0
+    split_report_stride = max(1, len(group_ids) // 1000)
+    last_split_reported = 2
+    for label in unique_labels:
         indices = np.flatnonzero(labels == label).astype(np.int64)
-        index_groups.extend(
-            [group.tolist() for group in split_axial_by_deviation(indices, normal_array, max_deviation)]
-        )
-    index_groups.sort(
-        key=lambda indices: -sum(
-            row_float(
-                max(groups[group_ids[index]], key=lambda row: row_float(row, "core_red_points") or 0.0),
-                "core_red_points",
+
+        def split_progress(
+            assigned: int,
+            component_total: int,
+            leaf_count: int,
+            *,
+            offset: int = component_offset,
+            component_label: int = label,
+        ) -> None:
+            nonlocal last_split_reported
+            current = min(orientation_total, 2 + offset + assigned)
+            if current < orientation_total and current - last_split_reported < split_report_stride:
+                return
+            _notify(
+                progress,
+                stage,
+                current,
+                orientation_total,
+                f"方向切分 {offset + assigned}/{len(group_ids)}，当前簇 {component_label}，叶组 {leaf_count}",
             )
-            or 0.0
-            for index in indices
+            last_split_reported = current
+
+        index_groups.extend(
+            [
+                group.tolist()
+                for group in split_axial_by_deviation(
+                    indices,
+                    normal_array,
+                    max_deviation,
+                    progress=split_progress,
+                )
+            ]
         )
+        component_offset += len(indices)
+    index_groups.sort(
+        key=lambda indices: (-sum(group_weights[index] for index in indices), min(indices))
     )
     result: dict[str, str] = {}
     for set_index, indices in enumerate(index_groups, start=1):
         set_id = f"J{set_index}"
         for index in indices:
             result[group_ids[index]] = set_id
-    _notify(progress, stage, 3, 3, f"完成 {len(index_groups)} 个节理组")
+    set_sizes = np.asarray([len(indices) for indices in index_groups], dtype=np.float64)
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "input_plane_groups": len(group_ids),
+                "initial_orientation_components": len(unique_labels),
+                "initial_largest_component": largest_component,
+                "orientation_set_count": len(index_groups),
+                "set_size_min": int(np.min(set_sizes)) if len(set_sizes) else 0,
+                "set_size_max": int(np.max(set_sizes)) if len(set_sizes) else 0,
+                "set_size_p50": float(np.quantile(set_sizes, 0.50)) if len(set_sizes) else 0.0,
+                "set_size_p90": float(np.quantile(set_sizes, 0.90)) if len(set_sizes) else 0.0,
+                "set_size_p99": float(np.quantile(set_sizes, 0.99)) if len(set_sizes) else 0.0,
+                "split_method": "adaptive_axial_bisection",
+                "max_deviation_deg": float(np.degrees(max_deviation)),
+            }
+        )
+    _notify(progress, stage, orientation_total, orientation_total, f"完成 {len(index_groups)} 个节理组")
     return result
 
 
@@ -644,17 +768,21 @@ def aggregate_global_results(
     joins their outputs into one named result object.
     """
 
+    merge_diagnostics: dict[str, Any] = {}
     merged_rows, plane_groups, old_to_global = merge_plane_rows(
         all_plane_rows,
         plan,
         config,
         progress=progress,
+        diagnostics=merge_diagnostics,
     )
+    provisional_orientation_diagnostics: dict[str, Any] = {}
     provisional_set_ids = global_orientation_sets(
         plane_groups,
         config,
         progress=progress,
         stage="全局方向聚类(预筛选)",
+        diagnostics=provisional_orientation_diagnostics,
     )
     for row in merged_rows:
         row["global_set_id"] = provisional_set_ids.get(str(row["global_plane_id"]))
@@ -678,11 +806,13 @@ def aggregate_global_results(
     selected_groups = {
         key: value for key, value in plane_groups.items() if key in selected_global_ids
     }
+    final_orientation_diagnostics: dict[str, Any] = {}
     global_set_ids = global_orientation_sets(
         selected_groups,
         config,
         progress=progress,
         stage="全局方向聚类(最终)",
+        diagnostics=final_orientation_diagnostics,
     )
     global_rows = aggregate_global_planes(
         selected_groups,
@@ -715,4 +845,9 @@ def aggregate_global_results(
         spacing_rows=cast(list[SpacingRecord], spacing_rows),
         joint_set_rows=cast(list[GlobalJointSetRecord], joint_set_rows),
         nearest_spacing_by_plane=nearest_spacing,
+        merge_diagnostics=merge_diagnostics,
+        orientation_diagnostics={
+            "provisional": provisional_orientation_diagnostics,
+            "final": final_orientation_diagnostics,
+        },
     )

@@ -215,6 +215,8 @@ class GlobalAggregationResult:
     spacing_rows: list[SpacingRecord]
     joint_set_rows: list[GlobalJointSetRecord]
     nearest_spacing_by_plane: dict[str, float]
+    merge_diagnostics: dict[str, Any] = field(default_factory=dict)
+    orientation_diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 class TraceRecord(TypedDict, total=False):

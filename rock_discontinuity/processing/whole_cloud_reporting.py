@@ -16,7 +16,7 @@ from ..core.models import (
 from .audit import audit_source_metadata
 from .density import discontinuity_density_metrics
 from .output_records import prepare_whole_cloud_auxiliary_rows, summarize_tile_density
-from .whole_cloud_contract import WHOLE_ALGORITHM_VERSION
+from .whole_cloud_contract import GLOBAL_AGGREGATION_VERSION, WHOLE_ALGORITHM_VERSION
 
 
 @dataclass
@@ -56,6 +56,7 @@ def prepare_whole_cloud_report(
     report = {
         "version": WHOLE_ALGORITHM_VERSION,
         "algorithm_version": WHOLE_ALGORITHM_VERSION,
+        "global_aggregation_version": GLOBAL_AGGREGATION_VERSION,
         "input": source,
         "coordinate_assumption": config["coordinate"],
         "tiling": {
@@ -86,6 +87,10 @@ def prepare_whole_cloud_report(
             "global_joint_set_count": len(aggregation.joint_set_rows),
             "spacing_rows": len(aggregation.spacing_rows),
             "tile_spacing_rows": len(all_spacing_rows),
+        },
+        "global_aggregation_diagnostics": {
+            "merge": aggregation.merge_diagnostics,
+            "orientation": aggregation.orientation_diagnostics,
         },
         "detachment": {
             "status": "geometry_only_candidate",

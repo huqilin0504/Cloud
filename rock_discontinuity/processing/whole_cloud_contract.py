@@ -1,6 +1,7 @@
 """Stable whole-cloud run contract constants."""
 
 WHOLE_ALGORITHM_VERSION = "0.7.0-multiscale-stability-hierarchical-merge"
+GLOBAL_AGGREGATION_VERSION = "0.8.0-adaptive-orientation-bisection-merge-diagnostics"
 
 
 def _packaged_defaults() -> dict[str, object]:
