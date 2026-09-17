@@ -33,4 +33,4 @@ rock-discontinuity = "rock_discontinuity.app.main:main"
 include = ["rock_discontinuity*"]
 
 [tool.setuptools.package-data]
-rock_discontinuity = ["config/*.yaml"]
+rock_discontinuity = ["config/*.yaml", "config/*.json"]

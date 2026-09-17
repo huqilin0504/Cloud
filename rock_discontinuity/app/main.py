@@ -10,6 +10,7 @@ import sys
 from collections.abc import Callable, Sequence
 
 from ..cli import main as roi_main
+from .crop_roi import main as crop_roi_main
 from .whole_cloud import main as whole_cloud_main
 from .roi_compare import main as roi_compare_main
 from ..validation.validate import main as validate_main
@@ -21,6 +22,7 @@ COMMANDS: dict[str, Command] = {
     "roi": roi_main,
     "validate": validate_main,
     "roi-compare": roi_compare_main,
+    "crop-roi": crop_roi_main,
 }
 
 HELP = """统一 LAS/LAZ 处理入口（不包含 OSGB 转换）
@@ -30,6 +32,7 @@ HELP = """统一 LAS/LAZ 处理入口（不包含 OSGB 转换）
   python3 main.py roi [ROI 识别参数]
   python3 main.py validate <输出目录>
   python3 main.py roi-compare [三个ROI消融比较参数]
+  python3 main.py crop-roi [投影多边形裁剪参数]
 
 默认命令是 whole-cloud，因此以下两种写法等价：
   python3 main.py --plan-only
@@ -44,7 +47,12 @@ HELP = """统一 LAS/LAZ 处理入口（不包含 OSGB 转换）
     --output outputs/discontinuity_roi_600
   python3 main.py validate outputs/discontinuity_roi_600
 
-也支持用 --mode whole-cloud|roi|validate|roi-compare 选择命令。
+河流上方岩坡裁剪：
+  python3 main.py crop-roi --input outputs/root_full_xyz_10/cloud.las \\
+    --roi-config rock_discontinuity/config/river_upper_cliff_roi.json \\
+    --output outputs/river_upper_cliff/cloud.laz
+
+也支持用 --mode whole-cloud|roi|validate|roi-compare|crop-roi 选择命令。
 
 兼容入口：项目根目录的 `python3 main.py` 默认执行 whole-cloud；
 `python3 -m rock_discontinuity` 保留历史行为，默认执行 ROI 命令。
@@ -58,12 +66,12 @@ def _select_command(arguments: Sequence[str]) -> tuple[str, list[str]]:
         return remaining[0], remaining[1:]
     if remaining and remaining[0] == "--mode":
         if len(remaining) < 2 or remaining[1] not in COMMANDS:
-            raise SystemExit("--mode 必须是 whole-cloud、roi、validate 或 roi-compare")
+            raise SystemExit("--mode 必须是 whole-cloud、roi、validate、roi-compare 或 crop-roi")
         return remaining[1], remaining[2:]
     if remaining and remaining[0].startswith("--mode="):
         command = remaining[0].split("=", 1)[1]
         if command not in COMMANDS:
-            raise SystemExit("--mode 必须是 whole-cloud、roi、validate 或 roi-compare")
+            raise SystemExit("--mode 必须是 whole-cloud、roi、validate、roi-compare 或 crop-roi")
         return command, remaining[1:]
     return "whole-cloud", remaining
 

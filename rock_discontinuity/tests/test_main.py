@@ -33,6 +33,13 @@ class MainEntryPointTests(unittest.TestCase):
             self.assertEqual(main(["roi-compare", "--output", "outputs/compare"]), 14)
         comparison.assert_called_once_with(["--output", "outputs/compare"])
 
+    def test_routes_projection_roi_crop(self):
+        crop = patch("rock_discontinuity.app.main.crop_roi_main", return_value=15).start()
+        self.addCleanup(patch.stopall)
+        with patch.dict(COMMANDS, {"crop-roi": crop}):
+            self.assertEqual(main(["crop-roi", "--input", "cloud.las"]), 15)
+        crop.assert_called_once_with(["--input", "cloud.las"])
+
 
 if __name__ == "__main__":
     unittest.main()
