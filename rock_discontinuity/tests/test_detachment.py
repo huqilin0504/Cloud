@@ -78,6 +78,45 @@ class DetachmentTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(tile_selected, [True])
 
+    def test_gate_rejects_below_min_major_extent(self):
+        planes = [
+            PlaneInstance(
+                plane_id="accepted",
+                set_id="J1",
+                area=2.5,
+                major_extent=3.5,
+                minor_extent=0.8,
+                boundary_completeness=0.8,
+                inlier_ratio=0.9,
+                normal_dispersion=3.0,
+                confidence=0.85,
+            ),
+            PlaneInstance(
+                plane_id="short_major",
+                set_id="J1",
+                area=2.5,
+                major_extent=2.5,
+                minor_extent=0.8,
+                boundary_completeness=0.8,
+                inlier_ratio=0.9,
+                normal_dispersion=3.0,
+                confidence=0.85,
+            ),
+        ]
+        config = {
+            "min_confidence": 0.70,
+            "min_area_m2": 2.0,
+            "min_major_extent_m": 3.0,
+            "min_minor_extent_m": 0.5,
+        }
+        selected, rows = classify_candidate_detachment_planes(planes, config, context="global")
+        np.testing.assert_array_equal(selected, [True, False])
+        self.assertEqual(rows[0]["status"], "candidate_joint_plane")
+        self.assertEqual(rows[1]["status"], "not_selected")
+        self.assertIn("below_min_major_extent", rows[1]["selection_reason"])
+        self.assertEqual(rows[0]["major_extent_m"], 3.5)
+        self.assertEqual(rows[1]["major_extent_m"], 2.5)
+
 
 if __name__ == "__main__":
     unittest.main()

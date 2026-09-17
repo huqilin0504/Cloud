@@ -29,6 +29,7 @@ def classify_candidate_joint_planes(
     min_confidence = float(config.get("min_confidence", 0.0))
     min_area = float(config.get("min_area_m2", 0.0))
     min_minor_extent = float(config.get("min_minor_extent_m", 0.0))
+    min_major_extent = float(config.get("min_major_extent_m", 0.0))
     min_boundary_completeness = float(config.get("min_boundary_completeness", 0.0))
     min_inlier_ratio = float(config.get("min_inlier_ratio", 0.0))
     max_normal_dispersion = float(config.get("max_normal_dispersion_deg", float("inf")))
@@ -47,6 +48,10 @@ def classify_candidate_joint_planes(
             not np.isfinite(plane.minor_extent) or plane.minor_extent < min_minor_extent
         ):
             failures.append("below_min_minor_extent")
+        if "min_major_extent_m" in config and (
+            not np.isfinite(plane.major_extent) or plane.major_extent < min_major_extent
+        ):
+            failures.append("below_min_major_extent")
         if "min_boundary_completeness" in config and (
             not np.isfinite(plane.boundary_completeness)
             or plane.boundary_completeness < min_boundary_completeness
@@ -77,6 +82,7 @@ def classify_candidate_joint_planes(
                     else ";".join(failures)
                 ),
                 "area_m2": float(plane.area),
+                "major_extent_m": float(plane.major_extent),
                 "minor_extent_m": float(plane.minor_extent),
                 "boundary_completeness": float(plane.boundary_completeness),
                 "edge_censored": bool(plane.edge_censored),

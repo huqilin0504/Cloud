@@ -6,6 +6,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -37,6 +38,7 @@ from rock_discontinuity.processing.tiling import (
     parse_tile_name as _parse_tile_name,
 )
 from rock_discontinuity.processing.whole_cloud import _format_progress, run_whole_cloud
+from rock_discontinuity.processing.whole_cloud_reporting import prepare_exported_plane_rows
 from rock_discontinuity.config import load_config
 
 
@@ -378,6 +380,79 @@ class WholeCloudTilingTests(unittest.TestCase):
         )
         self.assertEqual(selected, {"GJ-00001"})
         self.assertEqual(selection["GJ-00002"]["status"], "not_selected")
+
+    def test_global_candidate_gate_inherits_detachment_and_supports_major_extent(self):
+        rows = [
+            {
+                "global_plane_id": "GJ-00001",
+                "observed_area_m2": 2.5,
+                "major_extent_m": 3.5,
+                "minor_extent_m": 0.8,
+                "boundary_completeness": 0.85,
+                "inlier_ratio": 0.95,
+                "normal_dispersion_deg": 3.0,
+                "confidence": 0.9,
+            },
+            {
+                "global_plane_id": "GJ-00002",
+                "observed_area_m2": 2.5,
+                "major_extent_m": 2.2,  # fails major_extent >= 3.0
+                "minor_extent_m": 0.8,
+                "boundary_completeness": 0.85,
+                "inlier_ratio": 0.95,
+                "normal_dispersion_deg": 3.0,
+                "confidence": 0.9,
+            },
+            {
+                "global_plane_id": "GJ-00003",
+                "observed_area_m2": 0.8,  # fails area >= 2.0
+                "major_extent_m": 3.5,
+                "minor_extent_m": 0.8,
+                "boundary_completeness": 0.85,
+                "inlier_ratio": 0.95,
+                "normal_dispersion_deg": 3.0,
+                "confidence": 0.9,
+            },
+        ]
+        config = {
+            "detachment": {
+                "min_confidence": 0.7,
+                "min_area_m2": 0.25,
+                "min_minor_extent_m": 0.5,
+                "min_boundary_completeness": 0.7,
+                "min_inlier_ratio": 0.8,
+                "max_normal_dispersion_deg": 8.0,
+            },
+            "global_candidate_gate": {
+                "min_area_m2": 2.0,
+                "min_major_extent_m": 3.0,
+                "min_minor_extent_m": 0.5,
+            },
+        }
+        selected, selection = _apply_global_candidate_gate(rows, config)
+        self.assertEqual(selected, {"GJ-00001"})
+        self.assertEqual(selection["GJ-00001"]["status"], "candidate_joint_plane")
+        self.assertEqual(selection["GJ-00002"]["status"], "not_selected")
+        self.assertIn("below_min_major_extent", selection["GJ-00002"]["selection_reason"])
+        self.assertEqual(selection["GJ-00003"]["status"], "not_selected")
+        self.assertIn("below_min_area", selection["GJ-00003"]["selection_reason"])
+
+    def test_exported_instance_rows_match_final_global_selection(self):
+        rows = [
+            {"global_plane_id": "GJ-keep", "tile_id": "0_0", "plane_id": "P1"},
+            {"global_plane_id": "GJ-drop", "tile_id": "0_0", "plane_id": "P2"},
+        ]
+        aggregation = SimpleNamespace(
+            merged_plane_rows=rows,
+            selected_global_ids={"GJ-keep"},
+        )
+        selected = prepare_exported_plane_rows(aggregation, {"whole_cloud": {}})
+        self.assertEqual([row["plane_id"] for row in selected], ["P1"])
+        all_rows = prepare_exported_plane_rows(
+            aggregation,
+            {"whole_cloud": {"filter_detachment_csv": False}},
+        )
+        self.assertEqual(len(all_rows), 2)
 
     def test_cross_tile_merge_does_not_bridge_an_incompatible_chain(self):
         def row(tile_id, plane_id, xmin, xmax):

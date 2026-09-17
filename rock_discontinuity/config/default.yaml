@@ -135,6 +135,15 @@ detachment:
   # Safe for an explicit ROI; tiles keep censored facets for cross-tile recovery.
   reject_edge_censored_roi: true
 
+global_candidate_gate:
+  # Applied only after cross-tile aggregation. Local fragments keep the 0.5 m
+  # detection floor above, so a larger plane is not discarded before merging.
+  # A 3 m visible major extent starts the ISRM medium-persistence class; the
+  # area floor suppresses narrow/noisy fragments that merely happen to span 3 m.
+  min_area_m2: 2.0
+  min_major_extent_m: 3.0
+  min_minor_extent_m: 0.50
+
 boundary:
   method: alpha_shape
   alpha: auto
@@ -172,6 +181,8 @@ reproducibility:
 whole_cloud:
   # 每个瓦片独立处理；默认 2 线程，按内存情况用 --workers 调整。
   workers: 2
+  # The compatibility instance CSV should match the final global red overlay.
+  filter_detachment_csv: true
   # Cross-tile merging uses projected alpha-shape footprints, not only XYZ AABBs.
   footprint_max_points: 2000
   merge_enabled: true

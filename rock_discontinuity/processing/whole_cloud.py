@@ -52,6 +52,7 @@ from .state import (
 )
 from .global_aggregation import aggregate_global_results
 from .whole_cloud_reporting import (
+    prepare_exported_plane_rows,
     prepare_selected_plane_indices_by_tile,
     prepare_whole_cloud_report,
 )
@@ -487,10 +488,11 @@ def run_whole_cloud(
     report = prepared_report.report
     trace_rows = prepared_report.trace_rows
     aperture_rows = prepared_report.aperture_rows
+    exported_plane_rows = prepare_exported_plane_rows(aggregation, config)
     write_whole_cloud_outputs(
         output_dir,
         report,
-        plane_rows=merged_plane_rows,
+        plane_rows=exported_plane_rows,
         global_plane_rows=global_plane_rows,
         joint_set_rows=global_joint_set_rows,
         spacing_rows=global_spacing_rows,

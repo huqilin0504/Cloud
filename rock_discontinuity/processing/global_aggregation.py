@@ -585,6 +585,10 @@ def apply_global_candidate_gate(
 
     from .detachment import classify_candidate_joint_planes
 
+    gate_config = dict(config.get("detachment", {}))
+    if "global_candidate_gate" in config and config["global_candidate_gate"] is not None:
+        gate_config.update(config["global_candidate_gate"])
+
     total = max(1, len(global_plane_rows))
     _notify(progress, "全局候选筛选", 0, total, f"输入 {len(global_plane_rows)} 个")
     global_plane_objects: list[PlaneInstance] = []
@@ -593,6 +597,7 @@ def apply_global_candidate_gate(
             PlaneInstance(
                 plane_id=str(item["global_plane_id"]),
                 area=float(item.get("observed_area_m2") or 0.0),
+                major_extent=float(item.get("major_extent_m") or 0.0),
                 minor_extent=float(item.get("minor_extent_m") or 0.0),
                 boundary_completeness=float(item.get("boundary_completeness") or 0.0),
                 inlier_ratio=float(item.get("inlier_ratio") or 0.0),
@@ -603,7 +608,7 @@ def apply_global_candidate_gate(
         _notify(progress, "全局候选筛选", index, total, f"检查 {item['global_plane_id']}")
     global_selected, global_selection_rows = classify_candidate_joint_planes(
         global_plane_objects,
-        config.get("detachment", {}),
+        gate_config,
         context="global",
     )
     selected_global_ids = {

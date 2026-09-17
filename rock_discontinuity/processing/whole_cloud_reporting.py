@@ -11,6 +11,7 @@ from ..core.models import (
     ApertureRecord,
     GlobalAggregationResult,
     SpacingRecord,
+    TilePlaneRecord,
     TraceRecord,
 )
 from .audit import audit_source_metadata
@@ -27,6 +28,22 @@ class WholeCloudReportPreparation:
     selected_plane_indices_by_tile: dict[str, set[int]]
     trace_rows: list[TraceRecord]
     aperture_rows: list[ApertureRecord]
+
+
+def prepare_exported_plane_rows(
+    aggregation: GlobalAggregationResult,
+    config: dict[str, Any],
+) -> list[TilePlaneRecord]:
+    """Return instance rows represented by the final global candidate layer."""
+
+    rows = aggregation.merged_plane_rows
+    if not bool(config.get("whole_cloud", {}).get("filter_detachment_csv", True)):
+        return list(rows)
+    return [
+        row
+        for row in rows
+        if str(row.get("global_plane_id")) in aggregation.selected_global_ids
+    ]
 
 
 def prepare_whole_cloud_report(
@@ -50,6 +67,7 @@ def prepare_whole_cloud_report(
 ) -> WholeCloudReportPreparation:
     """Prepare all global report values without writing files or changing state."""
 
+    exported_plane_rows = prepare_exported_plane_rows(aggregation, config)
     total_red = sum(int(report["counts"]["candidate_red_points"]) for report in done_reports)
     total_core = sum(int(report["counts"]["core_points"]) for report in done_reports)
     total_input = sum(int(report["counts"]["input_points"]) for report in done_reports)
@@ -77,7 +95,8 @@ def prepare_whole_cloud_report(
             "tile_local_candidate_points": total_red,
             "candidate_red_points": int(merged_overlay_points),
             "merged_overlay_points": int(merged_overlay_points),
-            "candidate_plane_instances": len(aggregation.merged_plane_rows),
+            "tile_local_candidate_plane_instances": len(aggregation.merged_plane_rows),
+            "candidate_plane_instances": len(exported_plane_rows),
             "global_plane_groups_before_gate": len(aggregation.all_global_plane_rows),
             "cross_tile_duplicate_instances_merged": len(aggregation.merged_plane_rows)
             - len(aggregation.all_global_plane_rows),
@@ -97,6 +116,11 @@ def prepare_whole_cloud_report(
             "method": "projected_footprint_merge_then_global_candidate_gate",
             "confirmed_unstable_count": None,
             "overlay": str(merged_overlay),
+            "tile_local_gate": dict(config.get("detachment", {})),
+            "global_engineering_scale_gate": {
+                **dict(config.get("detachment", {})),
+                **dict(config.get("global_candidate_gate", {}) or {}),
+            },
             "note": "红色仅表示观测节理面候选；相邻瓦片平面按法向、平面偏移和投影足迹完整链接合并，并经全局质量门槛复判；未进行块体拓扑或力学稳定性判定。",
         },
         "failures": sorted(failures, key=lambda item: str(item["tile_id"])),
@@ -168,6 +192,7 @@ def prepare_selected_plane_indices_by_tile(
 
 __all__ = [
     "WholeCloudReportPreparation",
+    "prepare_exported_plane_rows",
     "prepare_selected_plane_indices_by_tile",
     "prepare_whole_cloud_report",
 ]

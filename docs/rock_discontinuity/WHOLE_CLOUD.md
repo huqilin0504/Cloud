@@ -26,6 +26,28 @@
 - 跨瓦片合并保留原有精确判据；XY 网格索引只做必要条件预筛选。`whole_cloud_report.json` 新增 `global_aggregation_diagnostics`，记录空间候选数、各拒绝门槛、初始方向簇规模、最终方向组规模分位数和实际算法版本。
 - 因为 `WHOLE_ALGORITHM_VERSION` 未改变，已有瓦片报告可以用 `--resume` 复用；但必须重新执行全局聚合，才能得到新的方向组和诊断字段。
 
+## 工程尺度两级门槛
+
+局部分块继续使用 `detachment` 中的 `0.25 m²` 面积和 `0.5 m` 短轴检测下限，
+目的是保留可能在块内被截断、随后需要跨瓦片合并的面片。跨瓦片合并完成后，
+`global_candidate_gate` 再对最终染色层和 `joint_planes.csv` 使用工程尺度筛选：
+
+- 观测面积不少于 `2.0 m²`；
+- 可见长轴不少于 `3.0 m`；
+- 短轴不少于 `0.5 m`；
+- 置信度、边界完整度、内点率和法向离散度继承 `detachment` 的质量门槛。
+
+`3 m` 对应 ISRM 1978 延续性分级中“中等延续性”的起点。它在这里只作为
+点云可见长轴的工程筛选代理，不冒充已经人工核验的迹长；真正的
+`trace_length_m` 仍保持不可用。对既有全量瓦片报告的系统抽样显示，当前 ROI 内
+候选面面积中位数约 `0.46 m²`、长轴中位数约 `1.12 m`，新门槛预计保留约
+`3.7%`，用于压制局部起伏造成的密集碎面。报告中的 `detachment.tile_local_gate`
+和 `detachment.global_engineering_scale_gate` 会记录实际使用的两级门槛。
+
+最终的 `candidate_detachment_points.laz`、`joint_planes.csv` 和
+`detachment_planes.csv` 使用同一全局筛选结果；筛选前实例数量另存为
+`counts.tile_local_candidate_plane_instances`，便于审计而不会污染最终染色层。
+
 该策略对应 PDAL 官方的 `length`、`origin_x/y` 和 `buffer` 语义；大文件读写使用 laspy 的 `chunk_iterator` 和分块写入方式：[PDAL splitter](https://pdal.io/en/2.9.1/stages/filters.splitter.html)、[laspy 大文件分块读写](https://laspy.readthedocs.io/en/latest/basic.html)。
 
 ## 运行
